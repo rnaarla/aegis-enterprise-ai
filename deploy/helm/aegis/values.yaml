@@ -1,0 +1,71 @@
+global:
+  environment: production
+  airGapped: false
+  tenantId: meridian-fin
+  imageRegistry: registry.internal.meridian.fin/aegis
+
+networkPolicy:
+  enabled: true
+  denyAllPublicEgress: true
+  allowedInternalCidrs:
+    - 10.42.0.0/16
+
+enterpriseTwin:
+  enabled: false
+
+ssoBroker:
+  replicas: 2
+  image:
+    repository: sso-delegation-broker
+    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+  port: 8081
+  oidcIssuerUrl: https://sso.meridian.fin/oauth2/default
+  maxTokenTtlSeconds: 300
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+secureRag:
+  replicas: 2
+  image:
+    repository: secure-rag-engine
+    digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+  port: 8084
+  offlineEmbeddings: true
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+
+platformServices:
+  - name: mcp-erp-bridge
+    port: 8085
+    replicas: 2
+    digest: sha256:5555555555555555555555555555555555555555555555555555555555555555
+  - name: pii-unmasking-proxy
+    port: 8086
+    replicas: 2
+    digest: sha256:6666666666666666666666666666666666666666666666666666666666666666
+  - name: temporal-approval-gate
+    port: 8087
+    replicas: 2
+    digest: sha256:7777777777777777777777777777777777777777777777777777777777777777
+  - name: edge-triage-router
+    port: 8088
+    replicas: 1
+    digest: sha256:8888888888888888888888888888888888888888888888888888888888888888
+  - name: finops-telemetry
+    port: 8089
+    replicas: 1
+    digest: sha256:9999999999999999999999999999999999999999999999999999999999999999
+  - name: admin-control-plane
+    port: 8092
+    replicas: 2
+    digest: sha256:1212121212121212121212121212121212121212121212121212121212121212

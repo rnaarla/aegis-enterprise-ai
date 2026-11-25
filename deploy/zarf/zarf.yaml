@@ -1,0 +1,23 @@
+kind: ZarfPackageConfig
+metadata:
+  name: aegis-enterprise-ai-airgap
+  description: "Zero-Egress Disconnected Bundle: Aegis Control Plane, RLS Vector Store, and Quantized LLM Weights"
+  version: 0.1.0
+  architecture: amd64
+
+components:
+  - name: aegis-core-platform
+    required: true
+    charts:
+      - name: aegis
+        namespace: aegis-system
+        version: 0.1.0
+        localPath: ../helm/aegis
+        valuesFiles:
+          - ../helm/aegis/values-prod-airgap.yaml
+    images:
+      - registry.internal.meridian.fin/aegis/sso-delegation-broker@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      - registry.internal.meridian.fin/aegis/secure-rag-engine@sha256:2222222222222222222222222222222222222222222222222222222222222222
+      - pgvector/pgvector:pg17
+      - redis:7.4-alpine
+      - vllm/vllm-openai:v0.7.2

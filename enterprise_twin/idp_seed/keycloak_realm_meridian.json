@@ -1,0 +1,87 @@
+{
+  "realm": "meridian",
+  "enabled": true,
+  "displayName": "Meridian Global Financial Enterprise SSO",
+  "sslRequired": "external",
+  "accessTokenLifespan": 900,
+  "clients": [
+    {
+      "clientId": "aegis-sso-broker",
+      "name": "Aegis RFC 8693 Agent Delegation Broker",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true
+    }
+  ],
+  "groups": [
+    { "name": "md-ma" },
+    { "name": "deal-chronos" },
+    { "name": "equity-analysts" },
+    { "name": "procurement-vp" },
+    { "name": "ap-ops" },
+    { "name": "platform-admins" },
+    { "name": "sec-ops" },
+    { "name": "all-employees" }
+  ],
+  "users": [
+    {
+      "username": "elena.vance",
+      "email": "elena.vance@meridian.fin",
+      "enabled": true,
+      "firstName": "Elena",
+      "lastName": "Vance",
+      "groups": ["/md-ma", "/deal-chronos", "/all-employees"],
+      "attributes": {
+        "tenant_id": ["meridian-fin"],
+        "department": ["CORP_DEV"],
+        "clearance": ["40"],
+        "po_approval_limit_usd": ["250000"]
+      }
+    },
+    {
+      "username": "marcus.chen",
+      "email": "marcus.chen@meridian.fin",
+      "enabled": true,
+      "firstName": "Marcus",
+      "lastName": "Chen",
+      "groups": ["/equity-analysts", "/all-employees"],
+      "attributes": {
+        "tenant_id": ["meridian-fin"],
+        "department": ["EQUITY_RESEARCH"],
+        "clearance": ["10"],
+        "po_approval_limit_usd": ["0"]
+      }
+    },
+    {
+      "username": "priya.nair",
+      "email": "priya.nair@meridian.fin",
+      "enabled": true,
+      "firstName": "Priya",
+      "lastName": "Nair",
+      "groups": ["/procurement-vp", "/ap-ops", "/all-employees"],
+      "attributes": {
+        "tenant_id": ["meridian-fin"],
+        "department": ["FINANCE_OPS"],
+        "clearance": ["20"],
+        "po_approval_limit_usd": ["50000"]
+      }
+    },
+    {
+      "username": "david.kim",
+      "email": "david.kim@meridian.fin",
+      "enabled": true,
+      "firstName": "David",
+      "lastName": "Kim",
+      "groups": ["/platform-admins", "/sec-ops", "/all-employees"],
+      "attributes": {
+        "tenant_id": ["meridian-fin"],
+        "department": ["SEC_OPS"],
+        "clearance": ["10"],
+        "po_approval_limit_usd": ["0"]
+      }
+    }
+  ]
+}

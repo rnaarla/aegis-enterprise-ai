@@ -1,0 +1,16 @@
+# Fortune 500 Live Sales PoV Profile — Activates isolated Enterprise Digital Twin
+global:
+  environment: sales-pov-demo
+  airGapped: false
+  tenantId: meridian-fin
+  imageRegistry: ghcr.io/aegis-enterprise
+
+enterpriseTwin:
+  enabled: true
+
+ssoBroker:
+  replicas: 1
+  oidcIssuerUrl: http://keycloak-twin.aegis.svc.cluster.local:8080/realms/meridian
+
+secureRag:
+  replicas: 1

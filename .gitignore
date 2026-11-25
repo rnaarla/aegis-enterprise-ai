@@ -1,0 +1,33 @@
+# Python virtualenvs & bytecode
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Static analysis & test caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Terraform local provider/state caches
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+
+# Node / TypeScript
+node_modules/
+*.tsbuildinfo
+
+# Local SQLite / WAL / OS artifacts
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.DS_Store

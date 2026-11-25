@@ -1,0 +1,22 @@
+# Regulated Bank / Hospital / Defense Zero-Egress Air-Gapped Profile
+global:
+  environment: prod-airgap
+  airGapped: true
+  tenantId: meridian-fin
+  imageRegistry: 127.0.0.1:31999/aegis
+
+enterpriseTwin:
+  enabled: false
+
+networkPolicy:
+  enabled: true
+  denyAllPublicEgress: true
+  allowedInternalCidrs:
+    - 10.240.0.0/16
+
+ssoBroker:
+  replicas: 3
+
+secureRag:
+  replicas: 3
+  offlineEmbeddings: true

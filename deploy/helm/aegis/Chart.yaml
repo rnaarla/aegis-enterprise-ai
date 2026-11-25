@@ -1,0 +1,16 @@
+apiVersion: v2
+name: aegis
+description: Aegis Enterprise AI — Air-Gap Capable Zero-Trust Agent Control & Data Plane
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+icon: https://meridian.fin/assets/aegis-icon.svg
+keywords:
+  - enterprise-ai
+  - zero-trust
+  - air-gapped
+  - rfc8693
+  - postgres-rls
+maintainers:
+  - name: Aegis Platform Architecture
+    email: platform-arch@meridian.fin

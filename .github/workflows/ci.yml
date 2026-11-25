@@ -1,0 +1,88 @@
+name: Aegis Zero-Trust CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+# Least-privilege GITHUB_TOKEN permissions
+permissions:
+  contents: read
+
+# Cancel superseded runs to avoid redundant compute
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Static Analysis, Kernel RLS & 3-Tier Suite (Zero-Cost Public Runner)
+    # Hard $0.00 cost guard: ONLY executes when repository is Public (unlimited free GitHub-hosted Linux tier)
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HF_HUB_OFFLINE: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL server & Tesseract OCR (apt)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql postgresql-contrib tesseract-ocr
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Set up Node.js 22 & TypeScript 6
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Helm & Terraform
+        uses: azure/setup-helm@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Install Python & TypeScript dev dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"
+          npm install --no-save typescript@latest
+
+      - name: Strict Python Typecheck (mypy --strict)
+        run: PYTHONPATH=packages:services:. .venv/bin/mypy --strict packages services enterprise_twin tests
+
+      - name: Strict TypeScript Typecheck & SDK Suite
+        run: |
+          ./node_modules/.bin/tsc --noEmit -p apps/admin_portal/tsconfig.json
+          node --experimental-strip-types apps/admin_portal/src/verify_portal.ts
+
+      - name: Lint & Security Audit (ruff + Bandit S rules)
+        run: .venv/bin/ruff check packages services enterprise_twin tests
+
+      - name: Helm Chart & Zero-Egress Terraform Validation
+        run: |
+          helm lint --strict deploy/helm/aegis -f deploy/helm/aegis/values.yaml
+          helm lint --strict deploy/helm/aegis -f deploy/helm/aegis/values-demo.yaml
+          helm lint --strict deploy/helm/aegis -f deploy/helm/aegis/values-prod-airgap.yaml
+          terraform -chdir=deploy/terraform/aws_airgap_vpc init -backend=false -input=false
+          terraform -chdir=deploy/terraform/aws_airgap_vpc validate
+
+      - name: Run 3-Tier Unit, Integration & System Suite (>=95% Coverage Gate)
+        run: |
+          PYTHONPATH=packages:services:. .venv/bin/python -m pytest -v \
+            --cov=packages --cov=services --cov=enterprise_twin \
+            --cov-report=term-missing --cov-fail-under=95 tests

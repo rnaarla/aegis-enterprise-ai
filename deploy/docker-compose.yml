@@ -1,0 +1,43 @@
+services:
+  postgres-rls:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aegis_migrator
+      POSTGRES_PASSWORD: ${AEGIS_DB_PASSWORD:-local_dev_only_change_me}
+      POSTGRES_DB: aegis
+    volumes:
+      - ./../services/secure_rag_engine/sql/001_rls_schema.sql:/docker-entrypoint-initdb.d/001_rls_schema.sql:ro
+    networks:
+      - aegis-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis_migrator -d aegis"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis-revocation:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    networks:
+      - aegis-internal
+
+  keycloak-twin:
+    image: quay.io/keycloak/keycloak:26.0
+    profiles: ["demo"]
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-local_demo_admin}
+    volumes:
+      - ./../enterprise_twin/idp_seed/keycloak_realm_meridian.json:/opt/keycloak/data/import/realm.json:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      - aegis-internal
+
+networks:
+  aegis-internal:
+    driver: bridge
+    internal: true
