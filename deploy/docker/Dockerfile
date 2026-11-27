@@ -38,10 +38,10 @@ WORKDIR /opt/aegis
 USER 65532:65532
 EXPOSE 8080
 
-ARG AEGIS_APP_FACTORY="sso_delegation_broker.app:create_broker_app"
-ENV AEGIS_APP_FACTORY=${AEGIS_APP_FACTORY}
+ARG AEGIS_SERVICE_NAME="sso-broker"
+ENV AEGIS_SERVICE_NAME=${AEGIS_SERVICE_NAME}
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
 
-CMD ["python", "-m", "uvicorn", "sso_delegation_broker.app:create_broker_app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "-m", "uvicorn", "--factory", "aegis_core.bootstrap:create_service_app_from_env", "--host", "0.0.0.0", "--port", "8080"]

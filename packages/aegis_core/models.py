@@ -38,16 +38,34 @@ class AuditEventType(StrEnum):
     TOKEN_EXCHANGED = "oauth.token_exchange.issued"  # noqa: S105
     TOKEN_EXCHANGE_DENIED = "oauth.token_exchange.denied"  # noqa: S105
     TOKEN_REVOKED = "oauth.token.revoked"  # noqa: S105
+    AGENT_SUBDELEGATED = "oauth.token_exchange.subdelegated"
     AGENT_KILLSWITCH = "oauth.agent.killswitch"
+    SSF_SECURITY_EVENT_PROCESSED = "oauth.ssf.security_event"
+    KEYRING_ROTATED = "oauth.keyring.rotated"
     RAG_RETRIEVAL_EXECUTED = "rag.retrieval.executed"
     RAG_RETRIEVAL_DENIED = "rag.retrieval.denied"
     PII_MASKED = "pii.proxy.masked"
     PII_UNMASKED = "pii.proxy.unmasked"
+    PII_EXFILTRATION_BLOCKED = "pii.proxy.exfiltration_blocked"
     TEMPORAL_GATE_PAUSED = "temporal.approval.paused"
     TEMPORAL_GATE_DECIDED = "temporal.approval.decided"
     LEGACY_BATCH_INGESTED = "ingestor.legacy.completed"
     EDGE_TRIAGE_ROUTED = "edge.triage.routed"
     PROMPT_VERSION_PROMOTED = "control_plane.prompt.promoted"
+    CANARY_AUTO_ROLLED_BACK = "control_plane.canary.rolled_back"
+    DUAL_CONTROL_APPROVED = "control_plane.dual_control.approved"
+
+
+class AuthorizationDetail(BaseModel):
+    """RFC 9396 Rich Authorization Request (RAR) structured fine-grained permission object."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    type: Literal["sap_po", "rag_corpus", "admin_mutation"]
+    actions: tuple[str, ...] = ()
+    max_amount_usd: float | None = Field(default=None, ge=0.0)
+    allowed_cost_centers: tuple[str, ...] = ()
+    allowed_sources: tuple[str, ...] = ()
 
 
 class HumanPrincipal(BaseModel):
@@ -84,12 +102,25 @@ class AgentManifest(BaseModel):
 
 
 class ActorClaim(BaseModel):
-    """RFC 8693 Section 4.1 `act` (Actor) claim identifying the delegated non-human agent."""
+    """RFC 8693 Section 4.1 `act` (Actor) claim supporting nested multi-hop delegation chains."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     sub: str = Field(description="SPIFFE ID of the acting non-human agent")
     client_id: str = Field(description="Registered agent client identifier")
+    act: ActorClaim | None = Field(
+        default=None,
+        description="Optional parent actor chain when an orchestrator delegates to a subagent",
+    )
+
+    def chain_spiffe_ids(self) -> tuple[str, ...]:
+        """Return ordered `(current_actor, parent_actor, ...)` SPIFFE IDs for cycle checks."""
+        if self.act is None:
+            return (self.sub,)
+        return (self.sub, *self.act.chain_spiffe_ids())
+
+
+ActorClaim.model_rebuild()
 
 
 class DelegatedTokenClaims(BaseModel):
@@ -113,10 +144,13 @@ class DelegatedTokenClaims(BaseModel):
     po_approval_limit_usd: int = Field(ge=0)
     act: ActorClaim
     cnf_jkt: str | None = None
+    cnf_x5t_s256: str | None = None
+    authorization_details: tuple[AuthorizationDetail, ...] = ()
+    delegation_depth: int = Field(default=1, ge=1, le=3)
 
 
 class TokenExchangeRequest(BaseModel):
-    """OAuth 2.0 Token Exchange (RFC 8693) request payload."""
+    """OAuth 2.0 Token Exchange (RFC 8693) + RFC 9396 RAR + RFC 8705 mTLS request payload."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -134,6 +168,8 @@ class TokenExchangeRequest(BaseModel):
     requested_scopes: list[str] = Field(min_length=1)
     requested_ttl_seconds: int = Field(default=300, ge=30, le=300)
     dpop_jkt: str | None = Field(default=None, max_length=128)
+    mtls_cert_thumbprint_s256: str | None = Field(default=None, max_length=128)
+    authorization_details: list[AuthorizationDetail] = Field(default_factory=list)
 
 
 class TokenExchangeResponse(BaseModel):
@@ -152,6 +188,8 @@ class TokenExchangeResponse(BaseModel):
     effective_clearance: ClearanceLevel
     narrowed_out_scopes: list[str]
     audit_entry_hash: str
+    authorization_details: list[AuthorizationDetail] = Field(default_factory=list)
+    delegation_depth: int = Field(default=1, ge=1, le=3)
 
 
 class ReBACTuple(BaseModel):
@@ -166,6 +204,17 @@ class ReBACTuple(BaseModel):
     subject_id: str
 
 
+class ReBACGroupHierarchyEdge(BaseModel):
+    """Transitive Zanzibar group/deal-room hierarchy edge (`parent_group` includes `child_id`)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tenant_id: str
+    parent_group: str = Field(min_length=2, max_length=128)
+    child_type: Literal["user", "group"]
+    child_id: str = Field(min_length=2, max_length=128)
+
+
 class DocumentChunk(BaseModel):
     """Normalized, access-controlled document chunk stored in PostgreSQL RLS store."""
 
@@ -176,7 +225,13 @@ class DocumentChunk(BaseModel):
     tenant_id: str
     title: str
     source_uri: str
-    source_system: Literal["sharepoint_ma", "cobol_core_banking", "sap_procurement", "policy_kb"]
+    source_system: Literal[
+        "sharepoint_ma",
+        "cobol_core_banking",
+        "sap_procurement",
+        "policy_kb",
+        "swift_iso20022",
+    ]
     page_or_record_ref: str
     classification: DocumentClassification
     clearance_required: ClearanceLevel
@@ -200,6 +255,7 @@ class ScoredChunk(BaseModel):
     dense_score: float
     lexical_score: float
     rrf_score: float
+    rerank_score: float | None = None
 
 
 class SecurityReceipt(BaseModel):
@@ -225,6 +281,7 @@ class RetrievalQuery(BaseModel):
 
     query: str = Field(min_length=2, max_length=2000)
     top_k: int = Field(default=5, ge=1, le=25)
+    enable_reranker: bool = True
 
 
 class RetrievalResponse(BaseModel):

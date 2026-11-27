@@ -16,12 +16,17 @@ spec:
       app.kubernetes.io/instance: {{ $.Release.Name }}
   template:
     metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: {{ .port | quote }}
       labels:
         app.kubernetes.io/name: {{ .name }}
         app.kubernetes.io/instance: {{ $.Release.Name }}
         app.kubernetes.io/part-of: aegis-platform
     spec:
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -39,6 +44,38 @@ spec:
               value: "1"
             - name: AEGIS_TENANT_ID
               value: {{ $.Values.global.tenantId | quote }}
+            - name: AEGIS_SERVICE_NAME
+              value: {{ .name | quote }}
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 15
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+          lifecycle:
+            preStop:
+              httpGet:
+                path: /v1/ops/drain
+                port: http
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

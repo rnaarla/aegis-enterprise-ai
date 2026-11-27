@@ -1,4 +1,4 @@
-"""Project 2: Static & Manifest Air-Gap Zero-Egress Readiness Auditor."""
+"""Project 2 V2: Static, SRE Operability & Supply-Chain Air-Gap Readiness Auditor."""
 
 from __future__ import annotations
 
@@ -25,10 +25,9 @@ class AirGapAuditReport(BaseModel):
 
 
 def verify_airgap_bundle_readiness(repo_root: Path) -> AirGapAuditReport:
-    """Verify Helm, Zarf, Docker Compose, and Terraform enforce zero public egress."""
+    """Verify Helm, Zarf, Compose, AWS/Azure Terraform, SRE PDB/SLO, and Cosign/SLSA policies."""
     findings: list[AirGapAuditFinding] = []
 
-    # 1. Verify air-gapped Helm values disable Enterprise Twin & enforce NetworkPolicy
     helm_airgap_path = repo_root / "deploy" / "helm" / "aegis" / "values-prod-airgap.yaml"
     airgap_vals: dict[str, Any] = yaml.safe_load(helm_airgap_path.read_text(encoding="utf-8"))
     twin_disabled = airgap_vals.get("enterpriseTwin", {}).get("enabled") is False
@@ -52,27 +51,47 @@ def verify_airgap_bundle_readiness(repo_root: Path) -> AirGapAuditReport:
         )
     )
 
-    # 2. Verify base Helm values pin `@sha256:` digests rather than mutable `:latest` tags
     base_vals: dict[str, Any] = yaml.safe_load(
         (repo_root / "deploy" / "helm" / "aegis" / "values.yaml").read_text(encoding="utf-8")
     )
     digests_ok = all(
         str(base_vals.get(svc, {}).get("image", {}).get("digest", "")).startswith("sha256:")
         for svc in ("ssoBroker", "secureRag")
+    ) and all(
+        str(item.get("digest", "")).startswith("sha256:")
+        for item in base_vals.get("platformServices", [])
     )
     findings.append(
         AirGapAuditFinding(
             check_id="IMMUTABLE_SHA256_IMAGE_DIGESTS",
             passed=digests_ok,
-            detail="All core service container images pinned by @sha256 digest",
+            detail="All core & runtime container images pinned by @sha256 digest",
         )
     )
 
-    # 3. Verify Docker Compose bridge network uses `internal: true` (zero host internet routing)
+    sre_tpl = (
+        repo_root / "deploy" / "helm" / "aegis" / "templates" / "sre-operability.yaml"
+    ).read_text(encoding="utf-8")
+    sre_ok = (
+        "PodDisruptionBudget" in sre_tpl
+        and "HorizontalPodAutoscaler" in sre_tpl
+        and "PrometheusRule" in sre_tpl
+        and "ClusterPolicy" in sre_tpl
+    )
+    findings.append(
+        AirGapAuditFinding(
+            check_id="SRE_PDB_HPA_SLO_AND_KYVERNO_COSIGN",
+            passed=sre_ok,
+            detail="Helm chart bundles PDB, HPA v2, Multi-Burn PrometheusRule & Kyverno Cosign policy",
+        )
+    )
+
     compose_data: dict[str, Any] = yaml.safe_load(
         (repo_root / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
     )
-    internal_net = compose_data.get("networks", {}).get("aegis-internal", {}).get("internal") is True
+    internal_net = (
+        compose_data.get("networks", {}).get("aegis-internal", {}).get("internal") is True
+    )
     findings.append(
         AirGapAuditFinding(
             check_id="COMPOSE_INTERNAL_ISOLATED_BRIDGE",
@@ -81,11 +100,13 @@ def verify_airgap_bundle_readiness(repo_root: Path) -> AirGapAuditReport:
         )
     )
 
-    # 4. Verify Zarf disconnected bundle packages local Helm chart & offline images
     zarf_data: dict[str, Any] = yaml.safe_load(
         (repo_root / "deploy" / "zarf" / "zarf.yaml").read_text(encoding="utf-8")
     )
-    zarf_ok = zarf_data.get("kind") == "ZarfPackageConfig" and len(zarf_data.get("components", [])) >= 1
+    zarf_ok = (
+        zarf_data.get("kind") == "ZarfPackageConfig"
+        and len(zarf_data.get("components", [])) >= 1
+    )
     findings.append(
         AirGapAuditFinding(
             check_id="ZARF_DISCONNECTED_PACKAGE_SPEC",
@@ -94,7 +115,6 @@ def verify_airgap_bundle_readiness(repo_root: Path) -> AirGapAuditReport:
         )
     )
 
-    # 5. Verify AWS Air-Gap VPC Terraform & PrivateLink module forbid IGW and NAT Gateways
     tf_root_text = (repo_root / "deploy" / "terraform" / "aws_airgap_vpc" / "main.tf").read_text(
         encoding="utf-8"
     )
@@ -108,25 +128,29 @@ def verify_airgap_bundle_readiness(repo_root: Path) -> AirGapAuditReport:
         / "vpc_privatelink.tf"
     )
     tf_mod_text = tf_mod_path.read_text(encoding="utf-8") if tf_mod_path.exists() else ""
-    dockerfile_path = repo_root / "deploy" / "docker" / "Dockerfile"
+    az_tf_path = repo_root / "deploy" / "terraform" / "azure_gov_enclave" / "main.tf"
+    az_tf_ok = az_tf_path.exists() and "Standard_DC32as_v5" in az_tf_path.read_text(encoding="utf-8")
+
+    dockerfile_text = (repo_root / "deploy" / "docker" / "Dockerfile").read_text(encoding="utf-8")
     dockerfile_ok = (
-        dockerfile_path.exists()
-        and "USER 65532:65532" in dockerfile_path.read_text(encoding="utf-8")
-        and "HF_HUB_OFFLINE=1" in dockerfile_path.read_text(encoding="utf-8")
+        "USER 65532:65532" in dockerfile_text
+        and "HF_HUB_OFFLINE=1" in dockerfile_text
+        and "--factory" in dockerfile_text
     )
     tf_zero_egress = (
         "aws_internet_gateway" not in tf_root_text
         and "aws_nat_gateway" not in tf_root_text
-        and "resource \"aws_internet_gateway\"" not in tf_mod_text
-        and "resource \"aws_nat_gateway\"" not in tf_mod_text
-        and "resource \"aws_vpc_endpoint\"" in tf_mod_text
+        and 'resource "aws_internet_gateway"' not in tf_mod_text
+        and 'resource "aws_nat_gateway"' not in tf_mod_text
+        and 'resource "aws_vpc_endpoint"' in tf_mod_text
         and dockerfile_ok
+        and az_tf_ok
     )
     findings.append(
         AirGapAuditFinding(
-            check_id="TERRAFORM_ZERO_IGW_ZERO_NAT",
+            check_id="TERRAFORM_MULTI_CLOUD_ZERO_EGRESS_AND_CONFIDENTIAL_COMPUTE",
             passed=tf_zero_egress,
-            detail="AWS VPC provisions zero Internet Gateways and zero NAT Gateways",
+            detail="AWS PrivateLink + Azure Gov SEV-SNP enclave enforce zero IGW/NAT + factory Dockerfile",
         )
     )
 

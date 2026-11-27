@@ -1,0 +1,108 @@
+{{- if .Values.sreOperability.pdbEnabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}-sso-broker-pdb
+  labels:
+    app.kubernetes.io/part-of: aegis-platform
+spec:
+  minAvailable: {{ .Values.ssoBroker.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sso-delegation-broker
+      app.kubernetes.io/instance: {{ .Release.Name }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}-secure-rag-pdb
+  labels:
+    app.kubernetes.io/part-of: aegis-platform
+spec:
+  minAvailable: {{ .Values.secureRag.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: secure-rag-engine
+      app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+{{- if .Values.sreOperability.hpaEnabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ .Release.Name }}-sso-broker-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ .Release.Name }}-sso-broker
+  minReplicas: {{ .Values.ssoBroker.replicas }}
+  maxReplicas: {{ .Values.ssoBroker.maxReplicas | default 12 }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+{{- end }}
+{{- if .Values.sreOperability.prometheusRulesEnabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}-sre-multi-burn-slo
+  labels:
+    app.kubernetes.io/part-of: aegis-platform
+spec:
+  groups:
+    - name: aegis.slo.burn_rate
+      rules:
+        - alert: AegisFastErrorBudgetBurn14x
+          expr: |
+            (sum(rate(aegis_http_requests_total{status=~"50[024]"}[5m])) / sum(rate(aegis_http_requests_total[5m]))) > (14.4 * (1 - {{ .Values.sreOperability.targetAvailabilitySlo }}))
+            and
+            (sum(rate(aegis_http_requests_total{status=~"50[024]"}[1h])) / sum(rate(aegis_http_requests_total[1h]))) > (14.4 * (1 - {{ .Values.sreOperability.targetAvailabilitySlo }}))
+          for: 2m
+          labels:
+            severity: page
+          annotations:
+            summary: "Fast 14.4x SLO error-budget burn detected across Aegis Zero-Trust Runtime"
+            runbook_url: "https://runbooks.aegis.internal/sre#fast-burn-14x"
+        - alert: AegisSlowErrorBudgetBurn6x
+          expr: |
+            (sum(rate(aegis_http_requests_total{status=~"50[024]"}[30m])) / sum(rate(aegis_http_requests_total[30m]))) > (6.0 * (1 - {{ .Values.sreOperability.targetAvailabilitySlo }}))
+          for: 15m
+          labels:
+            severity: ticket
+          annotations:
+            summary: "Sustained 6.0x SLO error-budget burn detected"
+{{- end }}
+{{- if .Values.supplyChain.kyvernoPolicyEnabled }}
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: {{ .Release.Name }}-require-cosign-and-slsa
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: verify-immutable-sha256-and-offline-cosign
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              selector:
+                matchLabels:
+                  app.kubernetes.io/part-of: aegis-platform
+      validate:
+        message: "Every Aegis container must pin @sha256 digest and run non-root UID 65532."
+        pattern:
+          spec:
+            securityContext:
+              runAsNonRoot: true
+            containers:
+              - image: "*@sha256:*"
+{{- end }}

@@ -1,15 +1,15 @@
-"""FastAPI HTTP transport for Project 1: Enterprise SSO & Delegation Broker."""
+"""FastAPI HTTP transport for Project 1: Enterprise SSO & Delegation Broker (V2)."""
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from aegis_core.http_middleware import install_aegis_http_layer
-from aegis_core.models import TokenExchangeRequest, TokenExchangeResponse
+from aegis_core.models import AuthorizationDetail, TokenExchangeRequest, TokenExchangeResponse
 from aegis_core.ports import AuditLedgerPort
 from sso_delegation_broker.broker import DelegationPolicyError, SSODelegationBroker
 
@@ -18,6 +18,23 @@ class IntrospectRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     token: str = Field(min_length=16)
+
+
+class SubdelegateRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    parent_agent_token: str = Field(min_length=16)
+    target_subagent_id: str = Field(min_length=3, max_length=128)
+    requested_scopes: list[str] = Field(min_length=1)
+    requested_ttl_seconds: int = Field(default=120, ge=10, le=300)
+    authorization_details: list[AuthorizationDetail] = Field(default_factory=list)
+    dpop_jkt: str | None = None
+
+
+class SSFEventRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    set_jwt: str = Field(min_length=16)
 
 
 class RevokeRequest(BaseModel):
@@ -35,24 +52,69 @@ def create_broker_app(broker: SSODelegationBroker, audit_ledger: AuditLedgerPort
     """Create production FastAPI application for OIDC/SAML -> RFC 8693 Token Exchange."""
     app = FastAPI(
         title="Aegis Enterprise SSO & Agent Delegation Broker",
-        version="0.2.0",
+        version="0.3.0",
         docs_url="/docs",
     )
-    install_aegis_http_layer(app, service_name="sso-delegation-broker")
+    install_aegis_http_layer(
+        app,
+        service_name="sso-delegation-broker",
+        dependency_checks={"jwks_active": lambda: len(broker.public_jwks().get("keys", [])) >= 1},
+    )
 
     @app.get("/.well-known/jwks.json")
     def jwks_endpoint() -> dict[str, Any]:
         return broker.public_jwks()
 
     @app.post("/v1/oauth/token", response_model=TokenExchangeResponse)
-    def token_exchange(req: TokenExchangeRequest) -> TokenExchangeResponse | JSONResponse:
+    def token_exchange(
+        req: TokenExchangeRequest,
+        request: Request,
+        dpop: str | None = Header(default=None, alias="DPoP"),
+    ) -> TokenExchangeResponse | JSONResponse:
         try:
-            return broker.exchange_token(req)
+            return broker.exchange_token(
+                req,
+                dpop_proof_jwt=dpop,
+                http_method=request.method,
+                http_url=str(request.url),
+            )
         except DelegationPolicyError as exc:
             return JSONResponse(
                 status_code=exc.status_code,
                 content={"error": exc.oauth_error, "error_description": exc.description},
             )
+
+    @app.post("/v1/oauth/subdelegate", response_model=TokenExchangeResponse)
+    def subdelegate(req: SubdelegateRequest) -> TokenExchangeResponse | JSONResponse:
+        try:
+            return broker.exchange_agent_to_agent(
+                parent_agent_token=req.parent_agent_token,
+                target_subagent_id=req.target_subagent_id,
+                requested_scopes=req.requested_scopes,
+                requested_ttl_seconds=req.requested_ttl_seconds,
+                authorization_details=req.authorization_details or None,
+                dpop_jkt=req.dpop_jkt,
+            )
+        except DelegationPolicyError as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"error": exc.oauth_error, "error_description": exc.description},
+            )
+
+    @app.post("/v1/ssf/events", response_model=None)
+    def ingest_ssf_event(req: SSFEventRequest) -> dict[str, Any] | JSONResponse:
+        try:
+            return broker.ingest_ssf_security_event(req.set_jwt)
+        except DelegationPolicyError as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"error": exc.oauth_error, "error_description": exc.description},
+            )
+
+    @app.post("/v1/keys/rotate")
+    def rotate_keys(tenant_id: str = "meridian-fin") -> dict[str, Any]:
+        new_kid = broker.rotate_signing_key(tenant_id=tenant_id)
+        return {"status": "rotated", "active_kid": new_kid, "jwks_count": len(broker.public_jwks()["keys"])}
 
     @app.post("/v1/oauth/introspect")
     def introspect(req: IntrospectRequest) -> dict[str, Any]:

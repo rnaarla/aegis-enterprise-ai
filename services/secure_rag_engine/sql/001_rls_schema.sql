@@ -1,5 +1,5 @@
 -- =============================================================================
--- Aegis Enterprise AI — Project 4: Kernel-Enforced Row-Level Secure RAG Schema
+-- Aegis Enterprise AI — Project 4 (V2): Kernel-Enforced Transitive Zanzibar RLS
 -- Target: PostgreSQL 16 / 17 / 18+
 -- =============================================================================
 
@@ -11,8 +11,6 @@ BEGIN
 END
 $$;
 
--- Pure-SQL SIMD-friendly L2-normalized cosine similarity for zero-dependency portability
--- (Paired with optional 002_pgvector_hnsw.sql when pgvector C extension is loaded)
 CREATE OR REPLACE FUNCTION aegis_cosine_similarity(a DOUBLE PRECISION[], b DOUBLE PRECISION[])
 RETURNS DOUBLE PRECISION
 LANGUAGE sql
@@ -36,6 +34,54 @@ CREATE TABLE IF NOT EXISTS rebac_tuples (
 
 CREATE INDEX IF NOT EXISTS idx_rebac_lookup
     ON rebac_tuples (tenant_id, object_id, relation, subject_type, subject_id);
+
+-- Transitive Group / Deal-Room Hierarchy (`parent_group` includes `child_id`)
+CREATE TABLE IF NOT EXISTS rebac_group_hierarchy (
+    tenant_id    TEXT NOT NULL,
+    parent_group TEXT NOT NULL,
+    child_type   TEXT NOT NULL CHECK (child_type IN ('user', 'group')),
+    child_id     TEXT NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, parent_group, child_type, child_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rebac_hierarchy_child
+    ON rebac_group_hierarchy (tenant_id, child_type, child_id, parent_group);
+
+-- Cycle-safe, depth-bounded (<= 8 hops) transitive group closure evaluated inside Postgres kernel
+CREATE OR REPLACE FUNCTION aegis_effective_groups(
+    p_tenant TEXT,
+    p_sub TEXT,
+    p_seed_groups TEXT[]
+)
+RETURNS TEXT[]
+LANGUAGE sql
+STABLE
+PARALLEL SAFE
+AS $$
+    WITH RECURSIVE group_walk(grp, depth, visited) AS (
+        SELECT g, 1, ARRAY[g]
+        FROM unnest(COALESCE(p_seed_groups, ARRAY[]::TEXT[])) AS g
+        WHERE g <> ''
+        UNION
+        SELECT h.parent_group, 1, ARRAY[h.parent_group]
+        FROM rebac_group_hierarchy h
+        WHERE h.tenant_id = p_tenant
+          AND h.child_type = 'user'
+          AND h.child_id = p_sub
+        UNION
+        SELECT h2.parent_group, gw.depth + 1, gw.visited || h2.parent_group
+        FROM group_walk gw
+        JOIN rebac_group_hierarchy h2
+          ON h2.tenant_id = p_tenant
+         AND h2.child_type = 'group'
+         AND h2.child_id = gw.grp
+        WHERE gw.depth < 8
+          AND NOT (h2.parent_group = ANY(gw.visited))
+    )
+    SELECT COALESCE(array_agg(DISTINCT grp), ARRAY[]::TEXT[])
+    FROM group_walk;
+$$;
 
 CREATE TABLE IF NOT EXISTS rag_chunks (
     chunk_id            TEXT PRIMARY KEY,
@@ -63,19 +109,17 @@ CREATE INDEX IF NOT EXISTS idx_rag_chunks_tenant_doc
 CREATE INDEX IF NOT EXISTS idx_rag_chunks_tsv
     ON rag_chunks USING GIN (search_tsv);
 
--- Grant minimal SELECT-only permissions to unprivileged runtime role
 GRANT USAGE ON SCHEMA public TO aegis_app_runtime;
 GRANT SELECT ON rag_chunks TO aegis_app_runtime;
 GRANT SELECT ON rebac_tuples TO aegis_app_runtime;
+GRANT SELECT ON rebac_group_hierarchy TO aegis_app_runtime;
 GRANT EXECUTE ON FUNCTION aegis_cosine_similarity(DOUBLE PRECISION[], DOUBLE PRECISION[]) TO aegis_app_runtime;
+GRANT EXECUTE ON FUNCTION aegis_effective_groups(TEXT, TEXT, TEXT[]) TO aegis_app_runtime;
 
--- =============================================================================
--- Kernel-Enforced Row-Level Security (FORCE RLS applies even to table owners)
--- =============================================================================
 ALTER TABLE rag_chunks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE rag_chunks FORCE ROW LEVEL SECURITY;
 
--- Policy 1 (PERMISSIVE): Positive Zanzibar ReBAC entitlement grant (user OR group)
+-- Policy 1 (PERMISSIVE): Positive Transitive Zanzibar ReBAC Grant (direct user OR transitive group)
 DROP POLICY IF EXISTS aegis_rebac_positive_grant ON rag_chunks;
 CREATE POLICY aegis_rebac_positive_grant ON rag_chunks
     AS PERMISSIVE
@@ -96,15 +140,18 @@ CREATE POLICY aegis_rebac_positive_grant ON rag_chunks
                   OR (
                       rt.subject_type = 'group'
                       AND rt.subject_id = ANY(
-                          string_to_array(COALESCE(current_setting('aegis.groups', true), ''), ',')
+                          aegis_effective_groups(
+                              COALESCE(NULLIF(current_setting('aegis.tenant_id', true), ''), '__NO_TENANT__'),
+                              COALESCE(NULLIF(current_setting('aegis.sub', true), ''), '__NO_USER__'),
+                              string_to_array(COALESCE(current_setting('aegis.groups', true), ''), ',')
+                          )
                       )
                   )
               )
         )
     );
 
--- Policy 2 (RESTRICTIVE): Non-bypassable Mandatory Guardrails
--- Enforces Tenant Isolation + MAC Clearance Ceiling + Investment Banking Ethical Wall DENY
+-- Policy 2 (RESTRICTIVE): Tenant Isolation + MAC Clearance + Transitive Ethical-Wall DENY
 DROP POLICY IF EXISTS aegis_mandatory_zero_trust_guard ON rag_chunks;
 CREATE POLICY aegis_mandatory_zero_trust_guard ON rag_chunks
     AS RESTRICTIVE
@@ -130,16 +177,17 @@ CREATE POLICY aegis_mandatory_zero_trust_guard ON rag_chunks
                   OR (
                       deny_rt.subject_type = 'group'
                       AND deny_rt.subject_id = ANY(
-                          string_to_array(COALESCE(current_setting('aegis.groups', true), ''), ',')
+                          aegis_effective_groups(
+                              COALESCE(NULLIF(current_setting('aegis.tenant_id', true), ''), '__NO_TENANT__'),
+                              COALESCE(NULLIF(current_setting('aegis.sub', true), ''), '__NO_USER__'),
+                              string_to_array(COALESCE(current_setting('aegis.groups', true), ''), ',')
+                          )
                       )
                   )
               )
         )
     );
 
--- =============================================================================
--- Append-Only Per-Tenant Hash-Chained Audit Ledger with Kernel Immutability Trigger
--- =============================================================================
 CREATE TABLE IF NOT EXISTS audit_ledger (
     sequence_id     BIGINT NOT NULL,
     occurred_at_iso TEXT NOT NULL,

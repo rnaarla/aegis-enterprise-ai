@@ -10,11 +10,25 @@ networkPolicy:
   allowedInternalCidrs:
     - 10.42.0.0/16
 
+sreOperability:
+  pdbEnabled: true
+  hpaEnabled: true
+  prometheusRulesEnabled: true
+  targetAvailabilitySlo: "0.9995"
+
+supplyChain:
+  kyvernoPolicyEnabled: true
+  requireOfflineCosignAttestation: true
+  requireSlsaProvenance: true
+  confidentialEnclaveProfile: "amd-sev-snp"
+
 enterpriseTwin:
   enabled: false
 
 ssoBroker:
-  replicas: 2
+  replicas: 3
+  minAvailable: 2
+  maxReplicas: 12
   image:
     repository: sso-delegation-broker
     digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
@@ -30,7 +44,9 @@ ssoBroker:
       memory: 512Mi
 
 secureRag:
-  replicas: 2
+  replicas: 3
+  minAvailable: 2
+  maxReplicas: 12
   image:
     repository: secure-rag-engine
     digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
@@ -59,11 +75,11 @@ platformServices:
     digest: sha256:7777777777777777777777777777777777777777777777777777777777777777
   - name: edge-triage-router
     port: 8088
-    replicas: 1
+    replicas: 2
     digest: sha256:8888888888888888888888888888888888888888888888888888888888888888
   - name: finops-telemetry
     port: 8089
-    replicas: 1
+    replicas: 2
     digest: sha256:9999999999999999999999999999999999999999999999999999999999999999
   - name: admin-control-plane
     port: 8092

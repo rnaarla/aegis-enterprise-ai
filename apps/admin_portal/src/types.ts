@@ -1,6 +1,6 @@
 /**
- * Project 12: Strictly-typed contracts for the Self-Serve Customer IT Admin Portal.
- * Mirrors `services/admin_control_plane/portal_api.py` and `services/finops_telemetry`.
+ * Project 12 (V2): Strictly-typed contracts for the Self-Serve Customer IT Admin Portal.
+ * Mirrors `services/admin_control_plane/` and `services/finops_telemetry/`.
  */
 
 export interface ShadowReplayGateSummary {
@@ -8,6 +8,8 @@ export interface ShadowReplayGateSummary {
   readonly total_tickets: number;
   readonly passed_tickets: number;
   readonly trajectory_accuracy: number;
+  readonly accuracy_ci99_lower?: number;
+  readonly slice_accuracies?: Readonly<Record<string, number>>;
   readonly policy_violations: number;
   readonly temporal_leakage_detected: boolean;
   readonly live_erp_writes_attempted: number;
@@ -23,6 +25,48 @@ export interface PromptVersionView {
   readonly is_active_production: boolean;
   readonly diff_from_previous: string;
   readonly last_shadow_replay: ShadowReplayGateSummary | null;
+}
+
+export interface CanaryStatusView {
+  readonly baseline_version_id: string;
+  readonly canary_version_id: string | null;
+  readonly canary_weight_pct: number;
+  readonly observed_samples: number;
+  readonly observed_errors: number;
+  readonly observed_error_rate: number;
+  readonly auto_rolled_back: boolean;
+  readonly last_rollback_reason: string | null;
+}
+
+export interface PolicyExplainStepView {
+  readonly gate_name: string;
+  readonly passed: boolean;
+  readonly explanation: string;
+}
+
+export interface PolicyExplainPlanView {
+  readonly decision: "ALLOW" | "DENY";
+  readonly subject_id: string;
+  readonly document_id: string;
+  readonly effective_groups: readonly string[];
+  readonly steps: readonly PolicyExplainStepView[];
+}
+
+export interface PolicyExplainInput {
+  readonly subject_id: string;
+  readonly direct_groups: readonly string[];
+  readonly subject_clearance: number;
+  readonly document_id: string;
+  readonly document_clearance_required: number;
+}
+
+export interface WormAuditBundleView {
+  readonly tenant_id: string;
+  readonly worm_mode: "COMPLIANCE";
+  readonly worm_retain_until: string;
+  readonly record_count: number;
+  readonly chain_tip_sha256: string;
+  readonly jws_attestation: string;
 }
 
 export interface MaskedConnectorSecretView {
@@ -50,6 +94,13 @@ export interface TraceWaterfallNode {
   readonly width_pct: number;
   readonly security_principal: string;
   readonly children: readonly TraceWaterfallNode[];
+}
+
+export interface CriticalPathBottleneck {
+  readonly span_id: string;
+  readonly name: string;
+  readonly self_duration_ms: number;
+  readonly share_of_trace_pct: number;
 }
 
 export interface DepartmentROICard {

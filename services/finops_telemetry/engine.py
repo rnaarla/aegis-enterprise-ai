@@ -1,4 +1,4 @@
-"""Cache/retry-aware OpenTelemetry GenAI cost attribution & CFO-defensible ROI engine."""
+"""Cache/retry/GPU-aware FinOps Engine with Atomic Budget Step-Down, Anomaly Z-Score & FOCUS 1.0."""
 
 from __future__ import annotations
 
@@ -6,12 +6,21 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from aegis_core.http_middleware import install_aegis_http_layer
+from aegis_core.sli_metrics import GLOBAL_SLI_REGISTRY, SLIRegistry
+from finops_telemetry.budget_governor import (
+    AtomicBudgetGovernor,
+    BudgetAdmissionResult,
+    WelfordCostAnomalyDetector,
+    compute_onprem_gpu_amortized_cost_usd,
+    render_focus_1_0_chargeback_rows,
+)
 
 
 @dataclass(frozen=True)
@@ -65,6 +74,7 @@ class GenAITelemetryEvent(BaseModel):
     reasoning_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     external_api_cost_usd: float = Field(default=0.0, ge=0.0)
+    onprem_gpu_compute_ms: float = Field(default=0.0, ge=0.0)
     is_retry_attempt: bool = False
     outcome: Literal["VERIFIED_RESOLVED", "HUMAN_ESCALATED", "FAILED_RETRY"]
 
@@ -88,7 +98,7 @@ class DepartmentROIReport(BaseModel):
 
 
 class FinOpsTelemetryEngine:
-    """Ingests OTel `gen_ai.*` events and computes exact token spend & net ROI per department."""
+    """Ingests OTel `gen_ai.*` events, governs atomic budgets, detects anomalies & exports FOCUS."""
 
     def __init__(
         self,
@@ -96,6 +106,7 @@ class FinOpsTelemetryEngine:
         db_path: Path | None = None,
         rate_cards: dict[str, ModelRateCard] | None = None,
         benchmarks: dict[str, WorkflowBenchmark] | None = None,
+        sli_registry: SLIRegistry | None = None,
     ) -> None:
         self._uri = str(db_path) if db_path is not None else ":memory:"
         self._lock = threading.RLock()
@@ -106,6 +117,9 @@ class FinOpsTelemetryEngine:
         self._benchmarks = (
             dict(benchmarks) if benchmarks is not None else dict(DEFAULT_WORKFLOW_BENCHMARKS)
         )
+        self.budget_governor = AtomicBudgetGovernor()
+        self.anomaly_detector = WelfordCostAnomalyDetector()
+        self._sli = sli_registry or GLOBAL_SLI_REGISTRY
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -140,7 +154,12 @@ class FinOpsTelemetryEngine:
             + (ev.reasoning_tokens / 1_000_000.0) * rate.reasoning_per_1m_usd
             + (ev.output_tokens / 1_000_000.0) * rate.output_per_1m_usd
         )
-        return round(token_cost + ev.external_api_cost_usd, 8)
+        gpu_cost = (
+            compute_onprem_gpu_amortized_cost_usd(gpu_compute_ms=ev.onprem_gpu_compute_ms)
+            if ev.onprem_gpu_compute_ms > 0.0
+            else 0.0
+        )
+        return round(token_cost + ev.external_api_cost_usd + gpu_cost, 8)
 
     def record_event(self, ev: GenAITelemetryEvent) -> float:
         cost = self.compute_event_cost_usd(ev)
@@ -150,6 +169,11 @@ class FinOpsTelemetryEngine:
             + ev.reasoning_tokens
             + ev.output_tokens
         )
+        alert = self.anomaly_detector.observe(f"{ev.tenant_id}:{ev.workflow_type}", total_toks)
+        if alert.is_anomalous:
+            self._sli.inc_counter(
+                "aegis_finops_token_anomalies_total", 1.0, {"tenant": ev.tenant_id}
+            )
         with self._lock:
             self._conn.execute(
                 """
@@ -176,6 +200,31 @@ class FinOpsTelemetryEngine:
             )
             self._conn.commit()
         return cost
+
+    def evaluate_budget_gate(
+        self,
+        *,
+        tenant_id: str,
+        cost_center: str,
+        requested_model_id: str,
+        estimated_cost_usd: float,
+        is_critical_override: bool = False,
+    ) -> BudgetAdmissionResult:
+        res = self.budget_governor.evaluate_and_reserve(
+            tenant_id=tenant_id,
+            cost_center=cost_center,
+            requested_model_id=requested_model_id,
+            estimated_cost_usd=estimated_cost_usd,
+            is_critical_override=is_critical_override,
+        )
+        self._sli.inc_counter(
+            "aegis_finops_budget_decisions_total", 1.0, {"decision": res.decision}
+        )
+        return res
+
+    def export_focus_chargeback(self, tenant_id: str) -> list[dict[str, str | float | int]]:
+        reports = self.department_roi_reports(tenant_id)
+        return render_focus_1_0_chargeback_rows(tenant_id, reports)
 
     def department_roi_reports(self, tenant_id: str) -> list[DepartmentROIReport]:
         with self._lock:
@@ -250,8 +299,26 @@ class FinOpsTelemetryEngine:
         return reports
 
 
+class SetBudgetRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tenant_id: str
+    cost_center: str
+    monthly_cap_usd: float = Field(gt=0.0)
+
+
+class BudgetCheckRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tenant_id: str
+    cost_center: str
+    requested_model_id: str
+    estimated_cost_usd: float = Field(ge=0.0)
+    is_critical_override: bool = False
+
+
 def create_finops_app(engine: FinOpsTelemetryEngine) -> FastAPI:
-    app = FastAPI(title="Aegis Department FinOps & ROI Telemetry API", version="0.2.0")
+    app = FastAPI(title="Aegis Department FinOps & ROI Telemetry API", version="0.3.0")
     install_aegis_http_layer(app, service_name="finops-telemetry")
 
     @app.post("/v1/finops/events")
@@ -259,8 +326,40 @@ def create_finops_app(engine: FinOpsTelemetryEngine) -> FastAPI:
         cost = engine.record_event(ev)
         return {"event_id": ev.event_id, "attributed_cost_usd": cost}
 
+    @app.post("/v1/finops/budgets")
+    def set_budget(req: SetBudgetRequest) -> dict[str, Any]:
+        engine.budget_governor.set_monthly_budget(
+            req.tenant_id, req.cost_center, req.monthly_cap_usd
+        )
+        return {"status": "configured", "monthly_cap_usd": req.monthly_cap_usd}
+
+    @app.post("/v1/finops/budgets/evaluate", response_model=None)
+    def check_budget(req: BudgetCheckRequest) -> dict[str, Any] | JSONResponse:
+        res = engine.evaluate_budget_gate(
+            tenant_id=req.tenant_id,
+            cost_center=req.cost_center,
+            requested_model_id=req.requested_model_id,
+            estimated_cost_usd=req.estimated_cost_usd,
+            is_critical_override=req.is_critical_override,
+        )
+        code = 429 if res.decision == "HARD_STOP_BUDGET_EXCEEDED" else 200
+        return JSONResponse(
+            status_code=code,
+            content={
+                "decision": res.decision,
+                "effective_model_id": res.effective_model_id,
+                "utilization_ratio": res.utilization_ratio,
+                "remaining_budget_usd": res.remaining_budget_usd,
+                "runbook_ref": res.runbook_ref,
+            },
+        )
+
     @app.get("/v1/finops/roi/{tenant_id}", response_model=list[DepartmentROIReport])
     def get_roi(tenant_id: str) -> list[DepartmentROIReport]:
         return engine.department_roi_reports(tenant_id)
+
+    @app.get("/v1/finops/focus-export/{tenant_id}")
+    def get_focus_export(tenant_id: str) -> list[dict[str, str | float | int]]:
+        return engine.export_focus_chargeback(tenant_id)
 
     return app

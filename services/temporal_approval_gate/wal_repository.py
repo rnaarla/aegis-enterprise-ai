@@ -1,4 +1,4 @@
-"""Crash-durable SQLite WAL Repository for pending & decided approval workflows."""
+"""Crash-durable SQLite WAL Repository for M-of-N Quorum & Omnichannel Approval Workflows."""
 
 from __future__ import annotations
 
@@ -40,6 +40,9 @@ class ApprovalWorkflowRecord(BaseModel):
         "FAILED_SAP_ERROR",
     ]
     slack_block_kit_json: dict[str, Any]
+    teams_adaptive_card_json: dict[str, Any] = Field(default_factory=dict)
+    required_quorum: int = 1
+    approved_by_list: list[str] = Field(default_factory=list)
     approver_sub: str | None = None
     sap_po_number: str | None = None
     failure_reason: str | None = None
@@ -71,6 +74,9 @@ class WalApprovalRepository:
                     payload_sha256       TEXT NOT NULL,
                     status               TEXT NOT NULL,
                     slack_card_json      TEXT NOT NULL,
+                    teams_card_json      TEXT NOT NULL DEFAULT '{}',
+                    required_quorum      INTEGER NOT NULL DEFAULT 1,
+                    approved_by_json     TEXT NOT NULL DEFAULT '[]',
                     approver_sub         TEXT,
                     sap_po_number        TEXT,
                     failure_reason       TEXT
@@ -92,6 +98,8 @@ class WalApprovalRepository:
         snapshot_etag: str,
         payload_hash: str,
         slack_card: dict[str, Any],
+        teams_card: dict[str, Any] | None = None,
+        required_quorum: int = 1,
     ) -> None:
         with self._lock, sqlite3.connect(self._db_path) as conn:
             conn.execute(
@@ -99,8 +107,8 @@ class WalApprovalRepository:
                 INSERT INTO durable_approval_workflows (
                     workflow_id, tenant_id, requester_sub, vendor_id, company_code,
                     description, amount_usd, snapshot_vendor_etag, payload_sha256,
-                    status, slack_card_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status, slack_card_json, teams_card_json, required_quorum, approved_by_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     workflow_id,
@@ -114,6 +122,9 @@ class WalApprovalRepository:
                     payload_hash,
                     "AWAITING_APPROVAL",
                     json.dumps(slack_card, sort_keys=True),
+                    json.dumps(teams_card or {}, sort_keys=True),
+                    required_quorum,
+                    "[]",
                 ),
             )
             conn.commit()
@@ -124,7 +135,8 @@ class WalApprovalRepository:
                 """
                 SELECT workflow_id, tenant_id, requester_sub, vendor_id, company_code,
                        description, amount_usd, snapshot_vendor_etag, payload_sha256,
-                       status, slack_card_json, approver_sub, sap_po_number, failure_reason
+                       status, slack_card_json, teams_card_json, required_quorum,
+                       approved_by_json, approver_sub, sap_po_number, failure_reason
                 FROM durable_approval_workflows
                 WHERE workflow_id = ?
                 """,
@@ -146,10 +158,25 @@ class WalApprovalRepository:
             payload_sha256=str(row[8]),
             status=status_val,
             slack_block_kit_json=json.loads(str(row[10])),
-            approver_sub=str(row[11]) if row[11] is not None else None,
-            sap_po_number=str(row[12]) if row[12] is not None else None,
-            failure_reason=str(row[13]) if row[13] is not None else None,
+            teams_adaptive_card_json=json.loads(str(row[11])),
+            required_quorum=int(row[12]),
+            approved_by_list=list(json.loads(str(row[13]))),
+            approver_sub=str(row[14]) if row[14] is not None else None,
+            sap_po_number=str(row[15]) if row[15] is not None else None,
+            failure_reason=str(row[16]) if row[16] is not None else None,
         )
+
+    def record_partial_quorum_vote(self, workflow_id: str, approved_by: list[str]) -> None:
+        with self._lock, sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                """
+                UPDATE durable_approval_workflows
+                SET approved_by_json = ?, approver_sub = ?
+                WHERE workflow_id = ?
+                """,
+                (json.dumps(approved_by), approved_by[-1] if approved_by else None, workflow_id),
+            )
+            conn.commit()
 
     def update_resolution(
         self,
@@ -159,14 +186,33 @@ class WalApprovalRepository:
         approver_sub: str,
         sap_po_number: str | None,
         failure_reason: str | None,
+        approved_by: list[str] | None = None,
     ) -> None:
         with self._lock, sqlite3.connect(self._db_path) as conn:
-            conn.execute(
-                """
-                UPDATE durable_approval_workflows
-                SET status = ?, approver_sub = ?, sap_po_number = ?, failure_reason = ?
-                WHERE workflow_id = ?
-                """,
-                (status, approver_sub, sap_po_number, failure_reason, workflow_id),
-            )
+            if approved_by is not None:
+                conn.execute(
+                    """
+                    UPDATE durable_approval_workflows
+                    SET status = ?, approver_sub = ?, sap_po_number = ?, failure_reason = ?,
+                        approved_by_json = ?
+                    WHERE workflow_id = ?
+                    """,
+                    (
+                        status,
+                        approver_sub,
+                        sap_po_number,
+                        failure_reason,
+                        json.dumps(approved_by),
+                        workflow_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE durable_approval_workflows
+                    SET status = ?, approver_sub = ?, sap_po_number = ?, failure_reason = ?
+                    WHERE workflow_id = ?
+                    """,
+                    (status, approver_sub, sap_po_number, failure_reason, workflow_id),
+                )
             conn.commit()

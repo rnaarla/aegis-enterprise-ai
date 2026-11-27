@@ -1,11 +1,19 @@
-"""Translates executive AI requests into constraint-checked 4-week SOWs, BOMs & threat models."""
+"""Translates executive AI intakes into Optimized BOMs, OSCAL SSPs, EU AI Act & 4-Week SOWs."""
 
 from __future__ import annotations
 
 import math
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from arch_scoper.optimizer_oscal import (
+    generate_customer_gitops_values_yaml,
+    generate_eu_ai_act_conformity_dossier,
+    generate_oscal_ssp_json,
+    simulate_delivery_schedule_monte_carlo,
+    solve_optimal_gpu_topology,
+)
 
 
 class ScopeDiscoveryIntake(BaseModel):
@@ -20,6 +28,7 @@ class ScopeDiscoveryIntake(BaseModel):
     peak_concurrent_users: int = Field(ge=1, le=50_000)
     corpus_document_count: int = Field(ge=100, le=100_000_000)
     autonomous_write_max_usd: float = Field(default=0.0, ge=0.0)
+    target_ttft_p99_ms: float = Field(default=350.0, ge=80.0, le=5000.0)
 
 
 class ConstraintConflict(BaseModel):
@@ -40,6 +49,7 @@ class InfrastructureBOM(BaseModel):
     pgvector_storage_gb: int
     clickhouse_telemetry_storage_gb: int
     estimated_monthly_infra_usd: float
+    projected_ttft_p99_ms: float = 220.0
 
 
 class ThreatControlMapping(BaseModel):
@@ -72,6 +82,10 @@ class GeneratedSOWPackage(BaseModel):
     four_week_plan: list[MilestoneWeek]
     mermaid_architecture_diagram: str
     sow_markdown: str
+    oscal_ssp_json: dict[str, Any] = Field(default_factory=dict)
+    eu_ai_act_dossier: dict[str, str] = Field(default_factory=dict)
+    gitops_helm_values_yaml: str = ""
+    monte_carlo_schedule_risk: dict[str, float | str] = Field(default_factory=dict)
 
 
 def validate_mermaid_flowchart_syntax(diagram: str) -> tuple[bool, str]:
@@ -88,7 +102,7 @@ def validate_mermaid_flowchart_syntax(diagram: str) -> tuple[bool, str]:
 
 
 class ArchitectureScoperEngine:
-    """Deterministic pre-sales scoping engine eliminating impossible promises & vague SOWs."""
+    """Deterministic scoping engine with Branch-and-Bound SKU Optimizer, OSCAL SSP & Monte Carlo."""
 
     def generate_sow(self, intake: ScopeDiscoveryIntake) -> GeneratedSOWPackage:
         conflicts: list[ConstraintConflict] = []
@@ -99,7 +113,6 @@ class ArchitectureScoperEngine:
             "P12: Admin Portal",
         ]
 
-        # 1. Detect mutually exclusive executive asks (the #1 cause of failed enterprise PoVs!)
         use_self_hosted_llm = intake.air_gapped_vpc_required or (
             "FEDRAMP_HIGH" in intake.compliance_regimes
         )
@@ -137,23 +150,14 @@ class ArchitectureScoperEngine:
             modules.append("P7: Async Temporal Approval Gate")
 
         modules.append("P10: Historical Shadow Replay Harness")
+        sorted_modules = sorted(modules)
 
-        # 2. Deterministic GPU VRAM + Vector Storage + Cost BOM Calculation
-        if use_self_hosted_llm:
-            # 70B AWQ 4-bit (~42GB weights + KV cache) on 2x L40S (96GB) per 60 concurrent users
-            gpu_pairs = max(1, math.ceil(intake.peak_concurrent_users / 60.0))
-            gpu_count = gpu_pairs * 2
-            gpu_type = "NVIDIA L40S 48GB"
-            vram_gb = gpu_count * 48
-            gpu_monthly_usd = gpu_count * 1_350.0
-        else:
-            # Single L4 24GB GPU for P8 local AWQ 8B triage node per 150 concurrent users
-            gpu_count = max(1, math.ceil(intake.peak_concurrent_users / 150.0))
-            gpu_type = "NVIDIA L4 24GB (Edge Triage)"
-            vram_gb = gpu_count * 24
-            gpu_monthly_usd = gpu_count * 520.0
+        gpu_type, gpu_count, vram_gb, gpu_monthly_usd, proj_ttft = solve_optimal_gpu_topology(
+            peak_concurrent_users=intake.peak_concurrent_users,
+            self_hosted_70b_required=use_self_hosted_llm,
+            target_ttft_p99_ms=intake.target_ttft_p99_ms,
+        )
 
-        # ~8 chunks/doc * 4KB (text + metadata + HNSW index + ReBAC tuples)
         pg_gb = max(50, math.ceil((intake.corpus_document_count * 8 * 4096) / (1024**3)) * 2)
         ch_gb = max(100, intake.peak_concurrent_users * 2)
         monthly_usd = round(gpu_monthly_usd + pg_gb * 0.25 + ch_gb * 0.12 + 450.0, 2)
@@ -165,23 +169,23 @@ class ArchitectureScoperEngine:
             pgvector_storage_gb=pg_gb,
             clickhouse_telemetry_storage_gb=ch_gb,
             estimated_monthly_infra_usd=monthly_usd,
+            projected_ttft_p99_ms=proj_ttft,
         )
 
-        # 3. STRIDE + OWASP LLM Top 10 Threat Model
         threats = [
             ThreatControlMapping(
                 threat_id="THR-01",
                 stride_category="Elevation of Privilege",
                 owasp_llm_ref="LLM08: Vector and Embedding Weaknesses",
                 attack_scenario="Junior employee uses prompt injection to retrieve executive M&A or HR chunks.",
-                mitigating_aegis_module="P1 (RFC 8693 Clearance JWT) + P4 (Postgres 18 FORCE RLS NOBYPASSRLS)",
+                mitigating_aegis_module="P1 (RFC 8693 DPoP/RAR JWT) + P4 (Postgres 18 Transitive FORCE RLS)",
             ),
             ThreatControlMapping(
                 threat_id="THR-02",
                 stride_category="Information Disclosure",
                 owasp_llm_ref="LLM02: Sensitive Information Disclosure",
                 attack_scenario="Raw SSNs, credit cards, or unannounced MNPI leak to external model endpoints.",
-                mitigating_aegis_module="P8 (Local AWQ 8B Triage Fail-Closed) + P6 (AES-256-GCM PII SSE Proxy)",
+                mitigating_aegis_module="P8 (Fail-Closed GPU Triage) + P6 (Feistel FPE & Exfiltration Firewall)",
             ),
             ThreatControlMapping(
                 threat_id="THR-03",
@@ -191,11 +195,10 @@ class ArchitectureScoperEngine:
                     "Agent hallucinates or double-submits a high-dollar ERP Purchase Order "
                     "or Vendor bank IBAN drifts."
                 ),
-                mitigating_aegis_module="P5 (MCP Idempotency Keys) + P7 (Temporal Slack Gate + Anti-TOCTOU ETag)",
+                mitigating_aegis_module="P5 (AIMD + WAL Idempotency) + P7 (Quorum/SoD + WebAuthn FIDO2 + ETag)",
             ),
         ]
 
-        # 4. 4-Week Execution Milestones with Hard Customer Prerequisite Gates
         plan = [
             MilestoneWeek(
                 week=1,
@@ -238,6 +241,23 @@ class ArchitectureScoperEngine:
         if not valid_diag:
             raise ValueError(f"Generated invalid Mermaid diagram: {diag_msg}")
 
+        oscal = generate_oscal_ssp_json(
+            client_name=intake.client_name,
+            selected_modules=sorted_modules,
+            air_gapped=intake.air_gapped_vpc_required,
+        )
+        eu_dossier = generate_eu_ai_act_conformity_dossier(intake.client_name)
+        helm_yaml = generate_customer_gitops_values_yaml(
+            client_name=intake.client_name,
+            air_gapped=intake.air_gapped_vpc_required,
+            autonomous_write_max_usd=intake.autonomous_write_max_usd,
+        )
+        mc_risk = simulate_delivery_schedule_monte_carlo(
+            air_gapped=intake.air_gapped_vpc_required,
+            has_sap_soap="SAP_SOAP" in intake.legacy_sources,
+            has_cobol="COBOL_MAINFRAME" in intake.legacy_sources,
+        )
+
         conflict_md = (
             "\n".join(
                 f"- **[{c.severity}] {c.conflict_code}:** {c.explanation} -> *{c.enforced_resolution}*"
@@ -250,19 +270,26 @@ class ArchitectureScoperEngine:
             f"## Objective\n{intake.executive_objective}\n\n"
             f"## Architectural Constraint Resolutions\n{conflict_md}\n\n"
             f"## Infrastructure Sizing & Monthly Run-Rate\n"
-            f"- **Compute:** {bom.inference_gpu_count}x {bom.inference_gpu_type} ({bom.total_vram_gb} GB VRAM)\n"
+            f"- **Compute:** {bom.inference_gpu_count}x {bom.inference_gpu_type} "
+            f"({bom.total_vram_gb} GB VRAM, projected TTFT p99 `{bom.projected_ttft_p99_ms}ms`)\n"
             f"- **Storage:** {bom.pgvector_storage_gb} GB RLS Vector DB + "
             f"{bom.clickhouse_telemetry_storage_gb} GB FinOps OLAP\n"
             f"- **Estimated Run-Rate:** USD {bom.estimated_monthly_infra_usd:,.2f}/month\n"
+            f"- **Monte Carlo Schedule:** p50 `{mc_risk['p50_business_days']}` days / "
+            f"p90 `{mc_risk['p90_business_days']}` days\n"
         )
 
         return GeneratedSOWPackage(
             client_name=intake.client_name,
-            selected_aegis_modules=sorted(modules),
+            selected_aegis_modules=sorted_modules,
             conflicts_resolved=conflicts,
             bom=bom,
             threat_model=threats,
             four_week_plan=plan,
             mermaid_architecture_diagram=diagram,
             sow_markdown=sow_md,
+            oscal_ssp_json=oscal,
+            eu_ai_act_dossier=eu_dossier,
+            gitops_helm_values_yaml=helm_yaml,
+            monte_carlo_schedule_risk=mc_risk,
         )

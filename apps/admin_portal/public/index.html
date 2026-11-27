@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Aegis Enterprise AI — Self-Serve IT Control Plane &amp; FinOps Portal</title>
+  <title>Aegis Enterprise AI — V2 Self-Serve IT Control Plane &amp; SRE Governance</title>
   <style>
     :root {
       --bg: #0b0f19;
@@ -13,8 +13,6 @@
       --muted: #8b9bb4;
       --accent: #38bdf8;
       --ok: #34d399;
-      --warn: #fbbf24;
-      --danger: #f87171;
     }
     * { box-sizing: border-box; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     body { margin: 0; background: var(--bg); color: var(--text); padding: 24px; }
@@ -23,53 +21,57 @@
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; }
     .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
     h1 { font-size: 20px; margin: 0; }
-    h2 { font-size: 15px; margin: 0 0 12px 0; color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
+    h2 { font-size: 14px; margin: 0 0 12px 0; color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
     label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
-    input, textarea { width: 100%; background: #090d16; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; font-size: 13px; }
-    button { background: var(--accent); color: #06121d; border: none; border-radius: 6px; padding: 8px 14px; font-weight: 700; cursor: pointer; font-size: 13px; }
+    input, textarea, select { width: 100%; background: #090d16; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; font-size: 13px; }
+    button { background: var(--accent); color: #06121d; border: none; border-radius: 6px; padding: 8px 14px; font-weight: 700; cursor: pointer; font-size: 13px; margin-right: 6px; }
     pre { background: #090d16; border: 1px solid var(--border); border-radius: 6px; padding: 10px; overflow-x: auto; font-size: 12px; color: var(--muted); }
-    .bar-track { background: #090d16; border-radius: 4px; height: 8px; width: 100%; margin-top: 4px; }
-    .bar-fill { background: var(--accent); height: 8px; border-radius: 4px; }
   </style>
 </head>
 <body>
   <header>
     <div>
-      <h1>Aegis Enterprise AI — Self-Serve Customer IT Control Plane</h1>
-      <small style="color: var(--muted)">Zero-CDN Air-Gap Safe UI | RFC 8693 Scoped (`admin:control_plane`) | 500-Ticket Shadow Replay Gate</small>
+      <h1>Aegis Enterprise AI — Self-Serve Customer IT Control Plane (V2)</h1>
+      <small style="color: var(--muted)">Zero-CDN Air-Gap UI | Progressive Canary SLO Rollback | Two-Person Rule KMS | Zero-Plaintext Explain | WORM SIEM</small>
     </div>
-    <span class="badge">FORCE RLS + KMS ACTIVE</span>
+    <span class="badge">FORCE RLS + FIDO2 + WORM ACTIVE</span>
   </header>
 
   <div class="grid">
     <section class="card">
-      <h2>1. Delegated Admin Session</h2>
-      <label for="jwt-input">RFC 8693 Delegated Bearer JWT (`at+jwt`)</label>
+      <h2>1. Delegated Admin Session &amp; WORM Export</h2>
+      <label for="jwt-input">RFC 8693 Delegated Bearer/DPoP JWT (`at+jwt`)</label>
       <input id="jwt-input" type="password" placeholder="Paste 5-minute delegated admin JWT..." />
-      <button type="button" onclick="refreshPortal()">Load Live Traces &amp; FinOps ROI</button>
+      <button type="button" onclick="refreshPortal()">Load Traces &amp; FinOps</button>
+      <button type="button" onclick="exportWorm()">Export Signed WORM SIEM</button>
     </section>
 
     <section class="card">
-      <h2>2. Prompt Rollout (Shadow-Replay Gated)</h2>
-      <label for="prompt-input">Candidate Production System Prompt</label>
-      <textarea id="prompt-input" rows="4">Enforce MNPI clearance strictly, block SPERR=X SAP vendors, and route POs exceeding USD 50,000 to Temporal Gate.</textarea>
-      <button type="button" onclick="draftAndPromotePrompt()">Draft &amp; Run 500-Ticket Shadow Gate</button>
+      <h2>2. Prompt Rollout &amp; Progressive Canary</h2>
+      <label for="prompt-input">Candidate System Prompt</label>
+      <textarea id="prompt-input" rows="3">Enforce MNPI clearance strictly, block SPERR=X SAP vendors, and route POs exceeding USD 50,000 to Temporal Gate.</textarea>
+      <select id="canary-pct">
+        <option value="10">10% Canary Stage</option>
+        <option value="50">50% Canary Stage</option>
+        <option value="100">100% Full Cutover</option>
+      </select>
+      <button type="button" onclick="draftAndCanary()">Draft &amp; Stage Canary</button>
       <pre id="prompt-status">Awaiting candidate promotion...</pre>
     </section>
 
     <section class="card">
-      <h2>3. KMS Connector Secret Rotation</h2>
-      <label for="conn-name">Connector ID</label>
-      <input id="conn-name" value="sap-s4hana-soap-wsse" />
-      <label for="conn-secret">New Raw Credential (AES-256-GCM Encrypted)</label>
-      <input id="conn-secret" type="password" placeholder="Enter new SAP / IdP credential..." />
-      <button type="button" onclick="rotateSecret()">Encrypt &amp; Rotate</button>
-      <pre id="secret-status">Plaintext secrets never leave browser unmasked after write.</pre>
+      <h2>3. Zero-Plaintext Policy Explain-Plan</h2>
+      <label for="exp-sub">Subject ID</label>
+      <input id="exp-sub" value="marcus.chen" />
+      <label for="exp-doc">Target Document ID</label>
+      <input id="exp-doc" value="doc-ma-chronos" />
+      <button type="button" onclick="explainAccess()">Simulate RLS / Ethical-Wall Trace</button>
+      <pre id="explain-status">Zero document plaintext is ever returned.</pre>
     </section>
 
     <section class="card">
-      <h2>4. OpenTelemetry Trace Waterfall &amp; Dept ROI</h2>
-      <div id="traces-container"><pre>Click "Load Live Traces &amp; FinOps ROI" with a valid admin token.</pre></div>
+      <h2>4. OpenTelemetry Waterfall, FinOps &amp; WORM</h2>
+      <div id="traces-container"><pre>Authenticate above to inspect live traces &amp; ROI.</pre></div>
     </section>
   </div>
 
@@ -78,29 +80,37 @@
       const tok = document.getElementById('jwt-input').value.trim();
       return { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' };
     }
-    async function draftAndPromotePrompt() {
+    async function draftAndCanary() {
       const statusEl = document.getElementById('prompt-status');
       const prompt = document.getElementById('prompt-input').value;
+      const pct = parseInt(document.getElementById('canary-pct').value, 10);
       const draftResp = await fetch('/v1/admin/prompts', {
         method: 'POST', headers: authHeaders(), body: JSON.stringify({ system_prompt: prompt })
       });
       const draft = await draftResp.json();
       if (!draftResp.ok) { statusEl.textContent = JSON.stringify(draft, null, 2); return; }
-      const promoResp = await fetch('/v1/admin/prompts/' + encodeURIComponent(draft.version_id) + '/promote', {
-        method: 'POST', headers: authHeaders()
+      const canResp = await fetch('/v1/admin/canary', {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ canary_version_id: draft.version_id, weight_pct: pct })
       });
-      statusEl.textContent = JSON.stringify(await promoResp.json(), null, 2);
+      statusEl.textContent = JSON.stringify(await canResp.json(), null, 2);
     }
-    async function rotateSecret() {
-      const resp = await fetch('/v1/admin/secrets', {
-        method: 'POST',
-        headers: authHeaders(),
+    async function explainAccess() {
+      const resp = await fetch('/v1/admin/policy/explain', {
+        method: 'POST', headers: authHeaders(),
         body: JSON.stringify({
-          connector_name: document.getElementById('conn-name').value,
-          raw_secret_value: document.getElementById('conn-secret').value
+          subject_id: document.getElementById('exp-sub').value,
+          direct_groups: ['junior_analysts'],
+          subject_clearance: 10,
+          document_id: document.getElementById('exp-doc').value,
+          document_clearance_required: 40
         })
       });
-      document.getElementById('secret-status').textContent = JSON.stringify(await resp.json(), null, 2);
+      document.getElementById('explain-status').textContent = JSON.stringify(await resp.json(), null, 2);
+    }
+    async function exportWorm() {
+      const resp = await fetch('/v1/admin/audit/worm-export', { headers: authHeaders() });
+      document.getElementById('traces-container').innerHTML = '<pre>' + JSON.stringify(await resp.json(), null, 2) + '</pre>';
     }
     async function refreshPortal() {
       const [trR, roiR] = await Promise.all([
@@ -110,7 +120,7 @@
       const traces = await trR.json();
       const roi = await roiR.json();
       document.getElementById('traces-container').innerHTML =
-        '<pre>' + JSON.stringify({ finops_roi: roi, otel_span_count: traces.length, spans: traces.slice(0, 6) }, null, 2) + '</pre>';
+        '<pre>' + JSON.stringify({ finops_roi: roi, otel_span_count: traces.length }, null, 2) + '</pre>';
     }
   </script>
 </body>

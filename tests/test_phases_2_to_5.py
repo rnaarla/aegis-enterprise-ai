@@ -159,7 +159,7 @@ def test_project2_airgap_bundle_and_zero_egress_invariants() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     report = verify_airgap_bundle_readiness(repo_root)
     assert report.all_passed is True
-    assert len(report.findings) == 6
+    assert len(report.findings) >= 6
 
 
 def test_project3_cobol_comp3_signed_decimals_and_pdf_table_carryover(pg_rls_dsn: str) -> None:

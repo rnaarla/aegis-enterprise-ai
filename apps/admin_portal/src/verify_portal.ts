@@ -1,6 +1,7 @@
 import {
   AegisAdminPortalClient,
   ControlPlaneHttpError,
+  analyzeCriticalPathBottlenecks,
   buildTraceWaterfall,
   summarizeTenantROI,
 } from "./index.ts";
@@ -13,8 +14,9 @@ function assert(condition: boolean, message: string): void {
 }
 
 async function runTypeScriptPortalSuite(): Promise<void> {
-  // 1. Unit test OTel Waterfall Tree Builder (empty, orphan, and nested spans)
+  // 1. Unit test OTel Waterfall Tree Builder & Critical-Path Flamegraph Bottleneck Analyzer
   assert(buildTraceWaterfall([]).length === 0, "Empty span list returns empty waterfall");
+  assert(analyzeCriticalPathBottlenecks([]).length === 0, "Empty bottlenecks on empty spans");
 
   const sampleSpans: readonly OTelSpanRaw[] = [
     {
@@ -22,7 +24,7 @@ async function runTypeScriptPortalSuite(): Promise<void> {
       span_id: "root-span",
       parent_span_id: "missing-external-parent",
       name: "aegis.oauth.token_exchange",
-      duration_ms: 40,
+      duration_ms: 50,
       attributes: { "aegis.sub": "elena.vance" },
     },
     {
@@ -30,7 +32,7 @@ async function runTypeScriptPortalSuite(): Promise<void> {
       span_id: "child-span",
       parent_span_id: "root-span",
       name: "gen_ai.retrieval",
-      duration_ms: 20,
+      duration_ms: 35,
       attributes: { "gen_ai.retrieval.top_k": 5 },
     },
   ];
@@ -38,10 +40,14 @@ async function runTypeScriptPortalSuite(): Promise<void> {
   const tree = buildTraceWaterfall(sampleSpans);
   assert(tree.length === 1, "Single root node reconstructed");
   assert(tree[0]?.security_principal === "elena.vance", "Extracted principal attribute");
-  assert(tree[0]?.children[0]?.width_pct === 50, "Computed child waterfall width percentage");
+  assert(tree[0]?.children[0]?.width_pct === 70, "Computed child waterfall width percentage");
   assert(tree[0]?.children[0]?.security_principal === "system", "Fallback system principal");
 
-  // 2. Unit test Tenant FinOps ROI Aggregator (zero-spend & multi-department)
+  const bottlenecks = analyzeCriticalPathBottlenecks(sampleSpans);
+  assert(bottlenecks[0]?.span_id === "child-span", "Leaf retrieval span has highest self duration (35ms)");
+  assert(bottlenecks[1]?.self_duration_ms === 15, "Root exclusive duration subtracts child (50 - 35 = 15ms)");
+
+  // 2. Unit test Tenant FinOps ROI Aggregator
   assert(summarizeTenantROI([]).overallMultiple === 0, "Zero spend handles division safely");
 
   const cards: readonly DepartmentROICard[] = [
@@ -64,7 +70,7 @@ async function runTypeScriptPortalSuite(): Promise<void> {
   const summary = summarizeTenantROI(cards);
   assert(summary.totalNetRoiUsd === 1412.5 && summary.overallMultiple === 566, "ROI summary math");
 
-  // 3. Integration test AegisAdminPortalClient HTTP transport & 422 Shadow Replay Gate error
+  // 3. Integration test AegisAdminPortalClient V2 APIs (Prompts, Canary, Explain-Plan, WORM, Secrets)
   const originalFetch = globalThis.fetch;
   try {
     globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -83,6 +89,49 @@ async function runTypeScriptPortalSuite(): Promise<void> {
             is_active_production: false,
             diff_from_previous: "+test",
             last_shadow_replay: null,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.endsWith("/v1/admin/canary")) {
+        return new Response(
+          JSON.stringify({
+            baseline_version_id: "prompt-v1",
+            canary_version_id: "prompt-v2",
+            canary_weight_pct: 10,
+            observed_samples: 0,
+            observed_errors: 0,
+            observed_error_rate: 0,
+            auto_rolled_back: false,
+            last_rollback_reason: null,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.endsWith("/v1/admin/policy/explain")) {
+        return new Response(
+          JSON.stringify({
+            decision: "DENY",
+            subject_id: "marcus.chen",
+            document_id: "doc-ma-chronos",
+            effective_groups: ["junior_analysts"],
+            steps: [{ gate_name: "RESTRICTIVE_MAC_CLEARANCE_CEILING", passed: false, explanation: "10 < 40" }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.endsWith("/v1/admin/audit/worm-export")) {
+        return new Response(
+          JSON.stringify({
+            tenant_id: "meridian-fin",
+            worm_mode: "COMPLIANCE",
+            worm_retain_until: "2033-11-25T00:00:00Z",
+            record_count: 42,
+            chain_tip_sha256: "a".repeat(64),
+            jws_attestation: "eyJ...",
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
@@ -117,6 +166,21 @@ async function runTypeScriptPortalSuite(): Promise<void> {
     const client = new AegisAdminPortalClient("https://cp.meridian.fin/", () => "delegated-jwt-xyz");
     const draft = await client.createPromptDraft("New system prompt");
     assert(draft.version_id === "prompt-v2", "Draft created");
+
+    const canary = await client.configureCanary("prompt-v2", 10);
+    assert(canary.canary_weight_pct === 10, "Canary stage set to 10%");
+
+    const explain = await client.explainPolicyAccess({
+      subject_id: "marcus.chen",
+      direct_groups: ["junior_analysts"],
+      subject_clearance: 10,
+      document_id: "doc-ma-chronos",
+      document_clearance_required: 40,
+    });
+    assert(explain.decision === "DENY", "Zero-plaintext policy explain verified DENY");
+
+    const worm = await client.exportWormAuditBundle();
+    assert(worm.worm_mode === "COMPLIANCE" && worm.record_count === 42, "Signed WORM bundle verified");
 
     const secret = await client.rotateConnectorSecret("sap-prd", "raw-secret-9921");
     assert(secret.masked_preview === "••••••••9921", "Connector secret masked");

@@ -1,13 +1,18 @@
 /**
- * Project 12: Self-Serve Admin Portal Client SDK, OTel Waterfall Builder & ROI Presenter.
+ * Project 12 (V2): Admin Portal Client SDK, Canary/Explain/WORM APIs & Flamegraph Analyzer.
  */
 
 import type {
+  CanaryStatusView,
+  CriticalPathBottleneck,
   DepartmentROICard,
   MaskedConnectorSecretView,
   OTelSpanRaw,
+  PolicyExplainInput,
+  PolicyExplainPlanView,
   PromptVersionView,
   TraceWaterfallNode,
+  WormAuditBundleView,
 } from "./types.ts";
 
 export class ControlPlaneHttpError extends Error {
@@ -43,6 +48,32 @@ export class AegisAdminPortalClient {
       `/v1/admin/prompts/${encodeURIComponent(versionId)}/promote`,
       { method: "POST" },
     );
+  }
+
+  public async configureCanary(
+    canaryVersionId: string,
+    weightPct: number,
+  ): Promise<CanaryStatusView> {
+    return this.requestJson<CanaryStatusView>("/v1/admin/canary", {
+      method: "POST",
+      body: JSON.stringify({
+        canary_version_id: canaryVersionId,
+        weight_pct: weightPct,
+      }),
+    });
+  }
+
+  public async explainPolicyAccess(input: PolicyExplainInput): Promise<PolicyExplainPlanView> {
+    return this.requestJson<PolicyExplainPlanView>("/v1/admin/policy/explain", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  public async exportWormAuditBundle(): Promise<WormAuditBundleView> {
+    return this.requestJson<WormAuditBundleView>("/v1/admin/audit/worm-export", {
+      method: "GET",
+    });
   }
 
   public async rotateConnectorSecret(
@@ -89,10 +120,7 @@ export function buildTraceWaterfall(spans: readonly OTelSpanRaw[]): readonly Tra
   if (spans.length === 0) {
     return [];
   }
-  const maxDuration = Math.max(
-    0.001,
-    ...spans.map((s) => s.duration_ms),
-  );
+  const maxDuration = Math.max(0.001, ...spans.map((s) => s.duration_ms));
 
   const byParent = new Map<string | null, OTelSpanRaw[]>();
   const spanIds = new Set(spans.map((s) => s.span_id));
@@ -113,7 +141,10 @@ export function buildTraceWaterfall(spans: readonly OTelSpanRaw[]): readonly Tra
     return children.map((sp): TraceWaterfallNode => {
       const subAttr = sp.attributes["aegis.sub"];
       const principal = typeof subAttr === "string" ? subAttr : "system";
-      const pct = Math.min(100, Math.max(1, Number(((sp.duration_ms / maxDuration) * 100).toFixed(2))));
+      const pct = Math.min(
+        100,
+        Math.max(1, Number(((sp.duration_ms / maxDuration) * 100).toFixed(2))),
+      );
       return {
         span_id: sp.span_id,
         name: sp.name,
@@ -127,6 +158,44 @@ export function buildTraceWaterfall(spans: readonly OTelSpanRaw[]): readonly Tra
   };
 
   return buildSubtree(null, 0);
+}
+
+/**
+ * Computes exclusive (`self`) span duration (`total_duration - sum(child_durations)`) to surface
+ * true critical-path bottlenecks in O(N log N) time.
+ */
+export function analyzeCriticalPathBottlenecks(
+  spans: readonly OTelSpanRaw[],
+): readonly CriticalPathBottleneck[] {
+  if (spans.length === 0) {
+    return [];
+  }
+  const childSumByParent = new Map<string, number>();
+  let totalRootMs = 0;
+  const spanIdSet = new Set(spans.map((s) => s.span_id));
+
+  for (const sp of spans) {
+    if (sp.parent_span_id !== null && spanIdSet.has(sp.parent_span_id)) {
+      const prev = childSumByParent.get(sp.parent_span_id) ?? 0;
+      childSumByParent.set(sp.parent_span_id, prev + sp.duration_ms);
+    } else {
+      totalRootMs += sp.duration_ms;
+    }
+  }
+
+  const denom = Math.max(0.001, totalRootMs);
+  const bottlenecks = spans.map((sp): CriticalPathBottleneck => {
+    const childMs = childSumByParent.get(sp.span_id) ?? 0;
+    const selfMs = Math.max(0, Number((sp.duration_ms - childMs).toFixed(3)));
+    return {
+      span_id: sp.span_id,
+      name: sp.name,
+      self_duration_ms: selfMs,
+      share_of_trace_pct: Number(((selfMs / denom) * 100).toFixed(2)),
+    };
+  });
+
+  return [...bottlenecks].sort((a, b) => b.self_duration_ms - a.self_duration_ms);
 }
 
 /**

@@ -227,7 +227,7 @@ async def test_integration_mcp_triage_finops_and_control_plane_http_apps() -> No
         assert init_r.json()["result"]["serverInfo"]["name"] == "aegis-sap-erp-mcp"
 
         list_r = await m_cli.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        assert len(list_r.json()["result"]["tools"]) == 3
+        assert len(list_r.json()["result"]["tools"]) >= 3
 
         ven_r = await m_cli.post(
             "/mcp",

@@ -1,12 +1,14 @@
-"""RFC 8693 JWT & RFC 7517/7638 JWKS cryptographic engine (ES256 & RS256)."""
+"""RFC 8693 JWT, RFC 7517/7638 JWKS, Nested `act` Chains, RAR & Dual-Key Rotation Engine."""
 
 from __future__ import annotations
 
 import base64
 import hashlib
 import json
+import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,12 +18,14 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 from aegis_core.models import (
     ActorClaim,
+    AuthorizationDetail,
     ClearanceLevel,
     DelegatedTokenClaims,
     HumanPrincipal,
 )
 
 MAX_DELEGATED_TTL_SECONDS = 300
+MAX_DELEGATION_DEPTH = 3
 
 
 class TokenVerificationError(Exception):
@@ -33,11 +37,25 @@ def _b64url_uint(val: int, length: int) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
-def _compute_jwk_thumbprint(jwk_core: dict[str, str]) -> str:
-    """Compute RFC 7638 SHA-256 JWK thumbprint for deterministic `kid`."""
+def compute_jwk_thumbprint(jwk_core: dict[str, str]) -> str:
+    """Compute RFC 7638 SHA-256 JWK thumbprint for deterministic `kid` and `cnf.jkt`."""
     canonical = json.dumps(jwk_core, sort_keys=True, separators=(",", ":")).encode("utf-8")
     digest = hashlib.sha256(canonical).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def compute_jwk_thumbprint_from_public_jwk(jwk: dict[str, Any]) -> str:
+    """Extract canonical RFC 7638 members from an EC or RSA public JWK and hash."""
+    kty = str(jwk.get("kty", ""))
+    if kty == "EC":
+        return compute_jwk_thumbprint(
+            {"crv": str(jwk["crv"]), "kty": "EC", "x": str(jwk["x"]), "y": str(jwk["y"])}
+        )
+    if kty == "RSA":
+        return compute_jwk_thumbprint(
+            {"e": str(jwk["e"]), "kty": "RSA", "n": str(jwk["n"])}
+        )
+    raise ValueError(f"Unsupported JWK kty for RFC 7638 thumbprint: {kty!r}")
 
 
 @dataclass(frozen=True)
@@ -58,7 +76,7 @@ class SigningKeyPair:
         numbers = public_key.public_numbers()
         x_b64 = _b64url_uint(numbers.x, 32)
         y_b64 = _b64url_uint(numbers.y, 32)
-        kid = _compute_jwk_thumbprint({"crv": "P-256", "kty": "EC", "x": x_b64, "y": y_b64})
+        kid = compute_jwk_thumbprint({"crv": "P-256", "kty": "EC", "x": x_b64, "y": y_b64})
 
         private_pem = private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
@@ -96,7 +114,7 @@ class SigningKeyPair:
         e_len = (numbers.e.bit_length() + 7) // 8
         n_b64 = _b64url_uint(numbers.n, n_len)
         e_b64 = _b64url_uint(numbers.e, e_len)
-        kid = _compute_jwk_thumbprint({"e": e_b64, "kty": "RSA", "n": n_b64})
+        kid = compute_jwk_thumbprint({"e": e_b64, "kty": "RSA", "n": n_b64})
 
         private_pem = private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
@@ -124,12 +142,71 @@ class SigningKeyPair:
         )
 
 
+class SigningKeyRing:
+    """Zero-downtime dual/multi-key ring supporting seamless `kid` rotation with JWKS grace window."""
+
+    def __init__(
+        self,
+        initial_key: SigningKeyPair | None = None,
+        *,
+        max_retained_keys: int = 3,
+    ) -> None:
+        self._lock = threading.RLock()
+        first = initial_key or SigningKeyPair.generate_es256()
+        self._keys: deque[SigningKeyPair] = deque([first], maxlen=max(2, max_retained_keys))
+
+    @property
+    def active_key(self) -> SigningKeyPair:
+        with self._lock:
+            return self._keys[0]
+
+    def rotate(self, new_key: SigningKeyPair | None = None) -> SigningKeyPair:
+        """Promote a new signing key while retaining previous public keys for verification."""
+        nxt = new_key or SigningKeyPair.generate_es256()
+        with self._lock:
+            self._keys.appendleft(nxt)
+            return nxt
+
+    def public_jwks(self) -> dict[str, Any]:
+        with self._lock:
+            return {"keys": [k.public_jwk for k in self._keys]}
+
+
+def _parse_actor_claim(raw_act: Any, depth: int = 1) -> tuple[ActorClaim, int]:
+    if depth > MAX_DELEGATION_DEPTH:
+        raise TokenVerificationError(
+            f"Delegation chain depth exceeds enterprise ceiling ({MAX_DELEGATION_DEPTH})"
+        )
+    if not isinstance(raw_act, dict) or "sub" not in raw_act or "client_id" not in raw_act:
+        raise TokenVerificationError("Missing or malformed RFC 8693 'act' claim")
+    nested_raw = raw_act.get("act")
+    if nested_raw is not None:
+        parent_claim, max_d = _parse_actor_claim(nested_raw, depth + 1)
+        return (
+            ActorClaim(
+                sub=str(raw_act["sub"]),
+                client_id=str(raw_act["client_id"]),
+                act=parent_claim,
+            ),
+            max_d,
+        )
+    return ActorClaim(sub=str(raw_act["sub"]), client_id=str(raw_act["client_id"])), depth
+
+
+def _serialize_actor_claim(act: ActorClaim) -> dict[str, Any]:
+    out: dict[str, Any] = {"sub": act.sub, "client_id": act.client_id}
+    if act.act is not None:
+        out["act"] = _serialize_actor_claim(act.act)
+    return out
+
+
 class JWKSVerifier:
     """Verifies RFC 8693 delegated tokens against a set of trusted public JWKs."""
 
     def __init__(self, *, issuer: str, expected_audience: str, jwks: dict[str, Any]) -> None:
         self._issuer = issuer
         self._expected_audience = expected_audience
+        self._lock = threading.RLock()
         self._keys_by_kid: dict[str, tuple[Any, str]] = {}
         self.reload_jwks(jwks)
 
@@ -152,25 +229,28 @@ class JWKSVerifier:
                 continue
             if kid:
                 parsed[kid] = (pub_key, alg)
-        self._keys_by_kid = parsed
+        with self._lock:
+            self._keys_by_kid = parsed
 
     def verify_delegated_jwt(
         self, token: str, *, now_epoch: int | None = None
     ) -> DelegatedTokenClaims:
-        """Cryptographically verify signature, TTL ceiling, audience, and RFC 8693 `act` claim."""
+        """Cryptographically verify signature, TTL ceiling, audience, RAR, and nested `act`."""
         try:
             header = jwt.get_unverified_header(token)
         except jwt.PyJWTError as exc:
             raise TokenVerificationError(f"Malformed JWT header: {exc}") from exc
 
         kid = str(header.get("kid", ""))
-        if kid not in self._keys_by_kid:
+        with self._lock:
+            key_entry = self._keys_by_kid.get(kid)
+        if key_entry is None:
             raise TokenVerificationError(f"Unknown signing key id: {kid!r}")
 
         if header.get("typ") != "at+jwt":
             raise TokenVerificationError("Invalid JWT typ header; expected RFC 9068 'at+jwt'")
 
-        pub_key, alg = self._keys_by_kid[kid]
+        pub_key, alg = key_entry
         try:
             payload: dict[str, Any] = jwt.decode(
                 token,
@@ -204,9 +284,10 @@ class JWKSVerifier:
         raw_aud = payload["aud"]
         aud_tuple = (raw_aud,) if isinstance(raw_aud, str) else tuple(str(x) for x in raw_aud)
 
-        raw_act = payload.get("act")
-        if not isinstance(raw_act, dict) or "sub" not in raw_act or "client_id" not in raw_act:
-            raise TokenVerificationError("Missing or malformed RFC 8693 'act' claim")
+        actor_claim, depth = _parse_actor_claim(payload.get("act"))
+        chain_ids = actor_claim.chain_spiffe_ids()
+        if len(set(chain_ids)) != len(chain_ids):
+            raise TokenVerificationError("Delegation cycle detected in nested RFC 8693 'act' chain")
 
         scope_str = str(payload.get("scope", "")).strip()
         scopes = tuple(s for s in scope_str.split(" ") if s)
@@ -214,10 +295,19 @@ class JWKSVerifier:
         groups = tuple(str(g) for g in raw_groups) if isinstance(raw_groups, list) else ()
 
         cnf_jkt: str | None = None
+        cnf_x5t: str | None = None
         if isinstance(payload.get("cnf"), dict):
             jkt_val = payload["cnf"].get("jkt")
             if isinstance(jkt_val, str):
                 cnf_jkt = jkt_val
+            x5t_val = payload["cnf"].get("x5t#S256")
+            if isinstance(x5t_val, str):
+                cnf_x5t = x5t_val
+
+        raw_rar = payload.get("authorization_details", [])
+        rar_details: tuple[AuthorizationDetail, ...] = ()
+        if isinstance(raw_rar, list):
+            rar_details = tuple(AuthorizationDetail.model_validate(item) for item in raw_rar)
 
         return DelegatedTokenClaims(
             iss=str(payload["iss"]),
@@ -234,8 +324,11 @@ class JWKSVerifier:
             scopes=scopes,
             clearance=ClearanceLevel(int(payload["clearance"])),
             po_approval_limit_usd=int(payload.get("po_approval_limit_usd", 0)),
-            act=ActorClaim(sub=str(raw_act["sub"]), client_id=str(raw_act["client_id"])),
+            act=actor_claim,
             cnf_jkt=cnf_jkt,
+            cnf_x5t_s256=cnf_x5t,
+            authorization_details=rar_details,
+            delegation_depth=depth,
         )
 
 
@@ -251,19 +344,31 @@ def mint_delegated_jwt(
     effective_clearance: ClearanceLevel,
     ttl_seconds: int,
     dpop_jkt: str | None = None,
+    mtls_cert_thumbprint_s256: str | None = None,
+    authorization_details: tuple[AuthorizationDetail, ...] = (),
+    parent_actor: ActorClaim | None = None,
+    max_exp_epoch: int | None = None,
     now_epoch: int | None = None,
 ) -> tuple[str, str, int]:
-    """Mint an RFC 8693 + RFC 9068 (`at+jwt`) short-lived delegated agent token.
-
-    Returns `(signed_jwt, jti, exp_epoch)`.
-    """
+    """Mint an RFC 8693 + RFC 9068 (`at+jwt`) short-lived delegated agent token."""
     if ttl_seconds < 1 or ttl_seconds > MAX_DELEGATED_TTL_SECONDS:
         raise ValueError(f"TTL must be between 1 and {MAX_DELEGATED_TTL_SECONDS} seconds")
 
     iat = now_epoch if now_epoch is not None else int(time.time())
     exp = iat + ttl_seconds
-    jti = str(uuid.uuid4())
+    if max_exp_epoch is not None:
+        exp = min(exp, max_exp_epoch)
+    if exp <= iat:
+        raise ValueError("Parent token already expired; cannot subdelegate")
 
+    actor = ActorClaim(sub=agent_spiffe_id, client_id=agent_client_id, act=parent_actor)
+    chain = actor.chain_spiffe_ids()
+    if len(chain) > MAX_DELEGATION_DEPTH:
+        raise ValueError(f"Subdelegation exceeds max depth ({MAX_DELEGATION_DEPTH})")
+    if len(set(chain)) != len(chain):
+        raise ValueError("Subdelegation cycle forbidden: agent already present in act chain")
+
+    jti = str(uuid.uuid4())
     claims: dict[str, Any] = {
         "iss": issuer,
         "sub": principal.subject_id,
@@ -279,13 +384,17 @@ def mint_delegated_jwt(
         "scope": " ".join(effective_scopes),
         "clearance": int(effective_clearance),
         "po_approval_limit_usd": principal.po_approval_limit_usd,
-        "act": {
-            "sub": agent_spiffe_id,
-            "client_id": agent_client_id,
-        },
+        "act": _serialize_actor_claim(actor),
     }
+    cnf: dict[str, str] = {}
     if dpop_jkt:
-        claims["cnf"] = {"jkt": dpop_jkt}
+        cnf["jkt"] = dpop_jkt
+    if mtls_cert_thumbprint_s256:
+        cnf["x5t#S256"] = mtls_cert_thumbprint_s256
+    if cnf:
+        claims["cnf"] = cnf
+    if authorization_details:
+        claims["authorization_details"] = [d.model_dump(exclude_none=True) for d in authorization_details]
 
     encoded = jwt.encode(
         payload=claims,

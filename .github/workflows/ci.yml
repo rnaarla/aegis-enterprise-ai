@@ -80,6 +80,8 @@ jobs:
           helm lint --strict deploy/helm/aegis -f deploy/helm/aegis/values-prod-airgap.yaml
           terraform -chdir=deploy/terraform/aws_airgap_vpc init -backend=false -input=false
           terraform -chdir=deploy/terraform/aws_airgap_vpc validate
+          terraform -chdir=deploy/terraform/azure_gov_enclave init -backend=false -input=false
+          terraform -chdir=deploy/terraform/azure_gov_enclave validate
 
       - name: Run 3-Tier Unit, Integration & System Suite (>=95% Coverage Gate)
         run: |

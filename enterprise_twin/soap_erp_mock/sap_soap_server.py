@@ -107,8 +107,28 @@ class LegacySAPSoapTwin:
         return (
             '<?xml version="1.0" encoding="UTF-8"?>'
             '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" '
+            'xmlns:xsd="http://www.w3.org/2001/XMLSchema" '
             f'targetNamespace="{SAP_BAPI_NS}" name="SAP_MM_PO_BAPI">'
-            "<message name=\"BAPI_VENDOR_GETDETAIL\"/><message name=\"BAPI_PO_CREATE1\"/>"
+            "<types><xsd:schema>"
+            '<xsd:element name="BAPI_VENDOR_GETDETAIL"><xsd:complexType><xsd:sequence>'
+            '<xsd:element name="LIFNR" type="xsd:string" minOccurs="1"/>'
+            "</xsd:sequence></xsd:complexType></xsd:element>"
+            '<xsd:element name="BAPI_PO_CREATE1"><xsd:complexType><xsd:sequence>'
+            '<xsd:element name="LIFNR" type="xsd:string" minOccurs="1"/>'
+            '<xsd:element name="NETPR" type="xsd:decimal" minOccurs="1"/>'
+            '<xsd:element name="TXZ01" type="xsd:string" minOccurs="1"/>'
+            '<xsd:element name="TESTRUN" type="xsd:string" minOccurs="0"/>'
+            "</xsd:sequence></xsd:complexType></xsd:element>"
+            '<xsd:element name="BAPI_PO_CANCEL"><xsd:complexType><xsd:sequence>'
+            '<xsd:element name="EBELN" type="xsd:string" minOccurs="1"/>'
+            "</xsd:sequence></xsd:complexType></xsd:element>"
+            "</xsd:schema></types>"
+            '<portType name="SAP_MM_PortType">'
+            '<operation name="BAPI_VENDOR_GETDETAIL"><documentation>Read SAP vendor LFA1</documentation></operation>'
+            '<operation name="BAPI_PO_CREATE1"><documentation>Create or simulate SAP PO</documentation></operation>'
+            '<operation name="BAPI_PO_CANCEL">'
+            "<documentation>Compensating reverse PO cancellation</documentation></operation>"
+            "</portType>"
             "</definitions>"
         )
 
@@ -137,7 +157,26 @@ class LegacySAPSoapTwin:
             return 200, self._exec_vendor_getdetail(op_el, ns)
         if local_name == "BAPI_PO_CREATE1":
             return 200, self._exec_po_create(op_el, ns)
+        if local_name == "BAPI_PO_CANCEL":
+            return 200, self._exec_po_cancel(op_el, ns)
         return 400, self._soap_fault("Sender", f"Unsupported SAP RFC operation: {local_name}")
+
+    def _exec_po_cancel(self, op_el: etree._Element, ns: dict[str, str]) -> bytes:
+        ebeln = op_el.findtext("bapi:EBELN", default="", namespaces=ns).strip()
+        with self._lock:
+            before = len(self._purchase_orders)
+            self._purchase_orders = [po for po in self._purchase_orders if po.ebeln != ebeln]
+            if len(self._purchase_orders) == before:
+                return self._bapi_response(
+                    "BAPI_PO_CANCELResponse",
+                    fields={"EBELN": ebeln},
+                    bapiret2=("E", "ME", "099", f"PO {ebeln} not found for cancellation"),
+                )
+            return self._bapi_response(
+                "BAPI_PO_CANCELResponse",
+                fields={"EBELN": ebeln, "CANCELLED": "X"},
+                bapiret2=("S", "06", "022", f"Purchase order {ebeln} reversed via Saga compensation"),
+            )
 
     def _exec_vendor_getdetail(self, op_el: etree._Element, ns: dict[str, str]) -> bytes:
         lifnr = op_el.findtext("bapi:LIFNR", default="", namespaces=ns).strip()

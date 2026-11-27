@@ -1,4 +1,4 @@
-"""PostgreSQL 18 `FORCE ROW LEVEL SECURITY` hybrid retrieval store."""
+"""PostgreSQL 18 `FORCE ROW LEVEL SECURITY` hybrid retrieval store with Transitive Zanzibar."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from aegis_core.models import (
     DelegatedTokenClaims,
     DocumentChunk,
     DocumentClassification,
+    ReBACGroupHierarchyEdge,
     ReBACTuple,
     ScoredChunk,
 )
@@ -33,10 +34,26 @@ class PostgresRLSRetrievalStore:
         self._pool = pool if pool is not None else BoundedPostgresPool(dsn, max_connections=16)
 
     def apply_migrations(self) -> None:
-        """Apply idempotent RLS schema, `NOBYPASSRLS` runtime role, and immutable audit triggers."""
+        """Apply idempotent RLS schema, transitive closure SQL, `NOBYPASSRLS`, & audit triggers."""
         ddl = _SCHEMA_SQL_PATH.read_text(encoding="utf-8")
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
             cur.execute(ddl)
+
+    def ingest_group_hierarchy(self, edges: list[ReBACGroupHierarchyEdge]) -> int:
+        """Upsert transitive Zanzibar group/deal-room hierarchy edges (`parent_group` -> `child_id`)."""
+        if not edges:
+            return 0
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            for edge in edges:
+                cur.execute(
+                    """
+                    INSERT INTO rebac_group_hierarchy (tenant_id, parent_group, child_type, child_id)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (tenant_id, parent_group, child_type, child_id) DO NOTHING
+                    """,
+                    (edge.tenant_id, edge.parent_group, edge.child_type, edge.child_id),
+                )
+        return len(edges)
 
     def ingest_chunks(
         self,
@@ -108,15 +125,11 @@ class PostgresRLSRetrievalStore:
         groups_csv = ",".join(claims.groups)
 
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
-            # 0. Bound worst-case query latency to protect connection pool under heavy load
             cur.execute(
                 "SELECT set_config('statement_timeout', %s, true)",
                 (f"{self._pool.statement_timeout_ms}ms",),
             )
-            # 1. Drop privileges to NOBYPASSRLS role inside transaction scope
             cur.execute("SET LOCAL ROLE aegis_app_runtime")
-
-            # 2. Parameterized transaction-local GUC binding (immune to SQL injection)
             cur.execute(
                 """
                 SELECT
@@ -133,7 +146,6 @@ class PostgresRLSRetrievalStore:
                 ),
             )
 
-            # 3. Verify kernel enforcement state inside the active transaction
             cur.execute(
                 """
                 SELECT
@@ -146,9 +158,6 @@ class PostgresRLSRetrievalStore:
             active_role = str(role_row[0]) if role_row else "unknown"
             rls_forced = bool(role_row[1]) if role_row else False
 
-            # 4. Hybrid Dense Cosine + PostgreSQL `ts_rank_cd` Reciprocal Rank Fusion (k=60)
-            # Every row scanned in `visible` has ALREADY passed both PERMISSIVE ReBAC and
-            # RESTRICTIVE Tenant + Clearance + Ethical-Wall policies inside the Postgres kernel.
             cur.execute(
                 """
                 WITH visible AS (

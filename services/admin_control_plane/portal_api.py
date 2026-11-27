@@ -1,21 +1,39 @@
-"""Domain Service for Project 12 Self-Serve Customer Admin Control Plane."""
+"""Domain Service for Project 12 Admin Control Plane (Canary, Two-Person Rule, SCIM & Explain)."""
 
 from __future__ import annotations
 
 import difflib
 import threading
 from datetime import UTC, datetime
+from typing import Any
 
 from enterprise_twin.corpus_seed.historical_tickets import HistoricalSupportTicket
 from pydantic import BaseModel, ConfigDict
 
 from admin_control_plane.app import create_admin_control_plane_app
+from admin_control_plane.canary_and_governance import (
+    CanaryRolloutController,
+    CanaryStatusView,
+    DualControlGovernanceRegistry,
+    DualControlProposal,
+    PolicyExplainPlanResult,
+    explain_zero_plaintext_policy_access,
+    export_signed_worm_audit_bundle,
+    sync_scim2_group_payload,
+)
 from admin_control_plane.secret_vault import (
     EnvelopeConnectorSecretStore,
     MaskedConnectorSecret,
 )
-from aegis_core.models import AuditEventType
+from aegis_core.crypto import SigningKeyPair
+from aegis_core.models import (
+    AuditEventType,
+    ClearanceLevel,
+    ReBACGroupHierarchyEdge,
+    ReBACTuple,
+)
 from aegis_core.ports import AuditLedgerPort
+from aegis_core.sli_metrics import GLOBAL_SLI_REGISTRY, SLIRegistry
 from aegis_core.telemetry import AegisTelemetry
 from finops_telemetry.engine import DepartmentROIReport, FinOpsTelemetryEngine
 from shadow_replay_harness.harness import (
@@ -68,7 +86,7 @@ DEFAULT_PRODUCTION_SYSTEM_PROMPT = (
 
 
 class ControlPlaneService:
-    """Domain orchestrator governing immutable prompt rollouts, KMS secrets, & OTel traces."""
+    """Governs prompt rollouts, canary SLOs, Two-Person Rule KMS, SCIM 2.0, Explain & WORM SIEM."""
 
     def __init__(
         self,
@@ -80,6 +98,8 @@ class ControlPlaneService:
         telemetry: AegisTelemetry,
         audit_ledger: AuditLedgerPort,
         kms_master_key: bytes | None = None,
+        worm_signing_key: SigningKeyPair | None = None,
+        sli_registry: SLIRegistry | None = None,
     ) -> None:
         self._broker = broker
         self._replay = replay_harness
@@ -88,7 +108,13 @@ class ControlPlaneService:
         self._telemetry = telemetry
         self._audit = audit_ledger
         self._secrets = EnvelopeConnectorSecretStore(kms_master_key)
+        self._worm_key = worm_signing_key or SigningKeyPair.generate_es256()
+        self._sli = sli_registry or GLOBAL_SLI_REGISTRY
+        self.canary = CanaryRolloutController(baseline_version_id="prompt-v1")
+        self.dual_control = DualControlGovernanceRegistry()
         self._lock = threading.RLock()
+        self._rebac_tuples: list[ReBACTuple] = []
+        self._hierarchy_edges: list[ReBACGroupHierarchyEdge] = []
         self._prompts: list[PromptVersionRecord] = [
             PromptVersionRecord(
                 version_id="prompt-v1",
@@ -198,6 +224,7 @@ class ControlPlaneService:
                 updated_list.append(updated)
             self._prompts = updated_list
 
+        self.canary.set_baseline(version_id)
         self._audit.append(
             tenant_id=claims.tenant_id,
             event_type=AuditEventType.PROMPT_VERSION_PROMOTED,
@@ -208,11 +235,71 @@ class ControlPlaneService:
             detail={
                 "version_id": version_id,
                 "accuracy": summary.trajectory_accuracy,
+                "ci99_lower": summary.accuracy_ci99_lower,
                 "tickets_tested": summary.total_tickets,
             },
         )
         assert promoted_record is not None
         return promoted_record
+
+    def configure_canary_stage(
+        self,
+        *,
+        bearer_token: str,
+        canary_version_id: str,
+        weight_pct: int,
+    ) -> CanaryStatusView:
+        claims = self._broker.verify_and_check_revocation(
+            bearer_token, required_scope="admin:prompts:write"
+        )
+        with self._lock:
+            candidate = next((p for p in self._prompts if p.version_id == canary_version_id), None)
+            if candidate is None:
+                raise KeyError(f"Unknown canary version_id: {canary_version_id!r}")
+
+        summary = self._replay.run_suite(
+            prompt_version_id=candidate.version_id,
+            system_prompt=candidate.system_prompt,
+            tickets=self._tickets,
+            agent=PolicyGuidedShadowAgent(),
+        )
+        if not summary.release_gate_passed:
+            raise PromptPromotionError(
+                f"Canary stage blocked by Shadow Replay Gate ({summary.trajectory_accuracy:.2%})",
+                replay_summary=summary,
+            )
+        view = self.canary.configure_canary(
+            canary_version_id=canary_version_id, weight_pct=weight_pct
+        )
+        self._sli.set_gauge(
+            "aegis_canary_traffic_weight_pct",
+            float(view.canary_weight_pct),
+            {"tenant": claims.tenant_id},
+        )
+        return view
+
+    def record_canary_sample(
+        self,
+        *,
+        tenant_id: str,
+        is_error: bool,
+        latency_ms: float,
+    ) -> CanaryStatusView:
+        rolled_back, view = self.canary.record_canary_outcome(
+            is_error=is_error, latency_ms=latency_ms
+        )
+        if rolled_back:
+            self._sli.inc_counter("aegis_canary_auto_rollbacks_total", 1.0, {"tenant": tenant_id})
+            self._audit.append(
+                tenant_id=tenant_id,
+                event_type=AuditEventType.CANARY_AUTO_ROLLED_BACK,
+                human_subject="sre_slo_watchdog",
+                actor_id="admin-control-plane",
+                jti=None,
+                decision="REVOKE",
+                detail={"reason": view.last_rollback_reason or "slo_breach"},
+            )
+        return view
 
     def rotate_connector_secret(
         self,
@@ -229,6 +316,127 @@ class ControlPlaneService:
             connector_name=connector_name,
             raw_secret=raw_secret,
             updated_by=claims.sub,
+        )
+
+    def propose_dual_control_secret_rotation(
+        self,
+        *,
+        bearer_token: str,
+        connector_name: str,
+        raw_secret: str,
+    ) -> DualControlProposal:
+        claims = self._broker.verify_and_check_revocation(
+            bearer_token, required_scope="admin:control_plane"
+        )
+        return self.dual_control.propose(
+            action_type="ROTATE_PROD_KMS_SECRET",
+            target_resource=connector_name,
+            secret_or_payload=raw_secret,
+            proposer_sub=claims.sub,
+        )
+
+    def approve_dual_control_secret_rotation(
+        self,
+        *,
+        bearer_token: str,
+        proposal_id: str,
+    ) -> tuple[DualControlProposal, MaskedConnectorSecret]:
+        claims = self._broker.verify_and_check_revocation(
+            bearer_token, required_scope="admin:control_plane"
+        )
+        approved, raw_secret = self.dual_control.approve_and_release(
+            proposal_id=proposal_id, co_signer_sub=claims.sub
+        )
+        masked = self._secrets.rotate(
+            tenant_id=claims.tenant_id,
+            connector_name=approved.target_resource,
+            raw_secret=raw_secret,
+            updated_by=f"{approved.proposer_sub}+{claims.sub}",
+        )
+        self._audit.append(
+            tenant_id=claims.tenant_id,
+            event_type=AuditEventType.DUAL_CONTROL_APPROVED,
+            human_subject=claims.sub,
+            actor_id=claims.act.sub,
+            jti=claims.jti,
+            decision="ALLOW",
+            detail={
+                "proposal_id": proposal_id,
+                "proposer": approved.proposer_sub,
+                "co_signer": claims.sub,
+                "connector": approved.target_resource,
+            },
+        )
+        return approved, masked
+
+    def sync_scim2_group(
+        self,
+        *,
+        bearer_token: str,
+        scim_group: dict[str, Any],
+        granted_document_ids: list[str] | None = None,
+    ) -> dict[str, int]:
+        claims = self._broker.verify_and_check_revocation(
+            bearer_token, required_scope="admin:control_plane"
+        )
+        edges, tuples = sync_scim2_group_payload(
+            tenant_id=claims.tenant_id,
+            scim_group=scim_group,
+            granted_document_ids=granted_document_ids,
+        )
+        with self._lock:
+            self._hierarchy_edges.extend(edges)
+            self._rebac_tuples.extend(tuples)
+        return {"hierarchy_edges_synced": len(edges), "rebac_tuples_synced": len(tuples)}
+
+    def register_policy_metadata_for_explain(
+        self,
+        *,
+        tuples: list[ReBACTuple],
+        edges: list[ReBACGroupHierarchyEdge] | None = None,
+    ) -> None:
+        with self._lock:
+            self._rebac_tuples.extend(tuples)
+            if edges:
+                self._hierarchy_edges.extend(edges)
+
+    def explain_policy_access(
+        self,
+        *,
+        bearer_token: str,
+        subject_id: str,
+        direct_groups: list[str],
+        subject_clearance: ClearanceLevel,
+        document_id: str,
+        document_clearance_required: ClearanceLevel,
+    ) -> PolicyExplainPlanResult:
+        claims = self._broker.verify_and_check_revocation(
+            bearer_token, required_scope="admin:control_plane"
+        )
+        with self._lock:
+            tuples = list(self._rebac_tuples)
+            edges = list(self._hierarchy_edges)
+        return explain_zero_plaintext_policy_access(
+            tenant_id=claims.tenant_id,
+            subject_id=subject_id,
+            direct_groups=direct_groups,
+            subject_clearance=subject_clearance,
+            document_id=document_id,
+            document_tenant_id=claims.tenant_id,
+            document_clearance_required=document_clearance_required,
+            rebac_tuples=tuples,
+            hierarchy_edges=edges,
+        )
+
+    def export_worm_audit_bundle(self, *, bearer_token: str) -> dict[str, Any]:
+        claims = self._broker.verify_and_check_revocation(
+            bearer_token, required_scope="admin:control_plane"
+        )
+        records = [r for r in self._audit.list_records() if r.tenant_id == claims.tenant_id]
+        return export_signed_worm_audit_bundle(
+            signing_key=self._worm_key,
+            tenant_id=claims.tenant_id,
+            records=records,
         )
 
     def inspect_otel_traces(self, *, bearer_token: str) -> list[TraceSpanSummary]:
@@ -270,8 +478,11 @@ class ControlPlaneService:
 
 
 __all__ = [
+    "CanaryStatusView",
     "ControlPlaneService",
+    "DualControlProposal",
     "MaskedConnectorSecret",
+    "PolicyExplainPlanResult",
     "PromptPromotionError",
     "PromptVersionRecord",
     "TraceSpanSummary",

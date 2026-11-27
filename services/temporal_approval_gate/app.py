@@ -1,4 +1,4 @@
-"""FastAPI HTTP transport for Project 7 Async Temporal Approval Gate."""
+"""FastAPI HTTP transport for Project 7 Async Temporal Approval Gate (Quorum + FIDO2)."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from aegis_core.http_middleware import (
     install_aegis_http_layer,
 )
 from sso_delegation_broker.broker import DelegationPolicyError
+from temporal_approval_gate.quorum_webauthn import WebAuthnStepUpAssertion
 from temporal_approval_gate.slack_signature import (
     SlackWebhookVerificationError,
     verify_slack_webhook_signature,
@@ -36,11 +37,12 @@ class SlackDecisionPayload(BaseModel):
         "urn:ietf:params:oauth:token-type:saml2",
     ] = "urn:ietf:params:oauth:token-type:access_token"  # noqa: S105
     comment: str = ""
+    webauthn_assertion: WebAuthnStepUpAssertion | None = None
 
 
 def create_approval_gate_app(gate: DurableApprovalGate) -> FastAPI:
-    """Expose PO submission, status query, and HMAC-verified Slack interactive webhook."""
-    app = FastAPI(title="Aegis Async Temporal Approval Gate", version="0.2.0")
+    """Expose PO submission, status query, and HMAC-verified Slack/FIDO2 interactive webhook."""
+    app = FastAPI(title="Aegis Async Temporal Approval Gate", version="0.3.0")
     install_aegis_http_layer(app, service_name="temporal-approval-gate")
 
     @app.post("/v1/approvals/po", response_model=ApprovalWorkflowRecord)
@@ -76,6 +78,11 @@ def create_approval_gate_app(gate: DurableApprovalGate) -> FastAPI:
             return gate.process_slack_decision(payload)
         except SlackWebhookVerificationError as exc:
             return JSONResponse(status_code=401, content={"error": str(exc)})
+        except PermissionError as exc:
+            return JSONResponse(
+                status_code=403,
+                content={"error": "webauthn_stepup_failed", "error_description": str(exc)},
+            )
         except DelegationPolicyError as exc:
             return JSONResponse(
                 status_code=exc.status_code,

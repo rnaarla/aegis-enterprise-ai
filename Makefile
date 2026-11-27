@@ -42,6 +42,8 @@ helm-lint:
 tf-validate:
 	$(TERRAFORM) -chdir=deploy/terraform/aws_airgap_vpc init -backend=false -input=false
 	$(TERRAFORM) -chdir=deploy/terraform/aws_airgap_vpc validate
+	$(TERRAFORM) -chdir=deploy/terraform/azure_gov_enclave init -backend=false -input=false
+	$(TERRAFORM) -chdir=deploy/terraform/azure_gov_enclave validate
 
 test-unit:
 	PYTHONPATH=$(PYTHONPATH) $(PYTEST) -v -m unit tests
@@ -51,6 +53,9 @@ test-integration:
 
 test-system:
 	PYTHONPATH=$(PYTHONPATH) $(PYTEST) -v -m system tests
+
+test-load:
+	PYTHONPATH=$(PYTHONPATH) $(PYTEST) -v tests/system/test_v2_production_load_and_chaos.py
 
 test-ts:
 	$(NODE) apps/admin_portal/src/verify_portal.ts

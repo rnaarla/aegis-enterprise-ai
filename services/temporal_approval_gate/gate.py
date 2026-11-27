@@ -1,4 +1,4 @@
-"""Domain Coordinator for Project 7 Async Temporal Approval Gate."""
+"""Domain Coordinator for Project 7 Async Temporal Gate (M-of-N Quorum, SoD & WebAuthn FIDO2)."""
 
 from __future__ import annotations
 
@@ -10,9 +10,16 @@ from typing import Any
 
 from aegis_core.models import AuditEventType, TokenExchangeRequest
 from aegis_core.ports import AuditLedgerPort
+from aegis_core.sli_metrics import GLOBAL_SLI_REGISTRY, SLIRegistry
 from mcp_erp_bridge.bridge import JSONRPCRequest, MCPERPBridgeServer
 from sso_delegation_broker.broker import DelegationPolicyError, SSODelegationBroker
 from temporal_approval_gate.app import SlackDecisionPayload, create_approval_gate_app
+from temporal_approval_gate.quorum_webauthn import (
+    AESGCMPayloadCodec,
+    WebAuthnStepUpAssertion,
+    build_teams_adaptive_card,
+    verify_webauthn_stepup_assertion,
+)
 from temporal_approval_gate.slack_signature import (
     SlackWebhookVerificationError,
     sign_slack_webhook_payload,
@@ -26,7 +33,7 @@ from temporal_approval_gate.wal_repository import (
 
 
 class DurableApprovalGate:
-    """Domain state machine orchestrating dry-run ETag capture, Slack approval, & SAP commit."""
+    """Orchestrates dry-run ETag capture, Four-Eyes SoD, M-of-N Quorum, WebAuthn & SAP commit."""
 
     def __init__(
         self,
@@ -36,12 +43,25 @@ class DurableApprovalGate:
         mcp_bridge: MCPERPBridgeServer,
         audit_ledger: AuditLedgerPort,
         slack_hmac_key: str = "meridian_slack_hmac_key_v1",
+        quorum_2_threshold_usd: float = 250_000.0,
+        webauthn_rp_id: str = "approvals.meridian.fin",
+        webauthn_origin: str = "https://approvals.meridian.fin",
+        sli_registry: SLIRegistry | None = None,
     ) -> None:
         self._repo = WalApprovalRepository(db_path)
         self._broker = broker
         self._mcp = mcp_bridge
         self._audit = audit_ledger
         self.slack_signing_secret = slack_hmac_key
+        self._quorum_2_threshold = quorum_2_threshold_usd
+        self._rp_id = webauthn_rp_id
+        self._origin = webauthn_origin
+        self._passkeys_by_sub: dict[str, bytes] = {}
+        self._sli = sli_registry or GLOBAL_SLI_REGISTRY
+
+    def register_approver_passkey(self, approver_sub: str, public_key_pem: bytes) -> None:
+        """Bind a hardware FIDO2/WebAuthn P-256 passkey to an executive approver identity."""
+        self._passkeys_by_sub[approver_sub] = public_key_pem
 
     def submit_high_stakes_po(
         self,
@@ -90,6 +110,7 @@ class DurableApprovalGate:
             ).encode("utf-8")
         ).hexdigest()
 
+        required_quorum = 2 if req.amount_usd >= self._quorum_2_threshold else 1
         slack_card: dict[str, Any] = {
             "channel": "#meridian-exec-po-approvals",
             "blocks": [
@@ -106,7 +127,7 @@ class DurableApprovalGate:
                         "type": "mrkdwn",
                         "text": (
                             f"*Requester:* `{claims.sub}` via `{claims.act.client_id}`\n"
-                            f"*Vendor:* `{req.vendor_id}` | *Description:* {req.description}\n"
+                            f"*Vendor:* `{req.vendor_id}` | *Quorum:* `{required_quorum}`\n"
                             f"*Snapshot ETag:* `{snapshot_etag[:16]}...`"
                         ),
                     },
@@ -121,6 +142,13 @@ class DurableApprovalGate:
                 },
             ],
         }
+        teams_card = build_teams_adaptive_card(
+            workflow_id=wf_id,
+            requester_sub=claims.sub,
+            vendor_id=req.vendor_id,
+            amount_usd=req.amount_usd,
+            required_quorum=required_quorum,
+        )
 
         self._repo.insert_pending(
             workflow_id=wf_id,
@@ -133,6 +161,8 @@ class DurableApprovalGate:
             snapshot_etag=snapshot_etag,
             payload_hash=payload_hash,
             slack_card=slack_card,
+            teams_card=teams_card,
+            required_quorum=required_quorum,
         )
 
         self._audit.append(
@@ -147,6 +177,7 @@ class DurableApprovalGate:
                 "amount_usd": round(req.amount_usd, 2),
                 "vendor_id": req.vendor_id,
                 "snapshot_etag": snapshot_etag,
+                "required_quorum": required_quorum,
             },
         )
         return self._repo.get(wf_id)
@@ -189,6 +220,21 @@ class DurableApprovalGate:
             )
             return self._repo.get(wf.workflow_id)
 
+        # Four-Eyes Separation of Duties (SoD): requester can NEVER approve their own PO
+        if approver_claims.sub == wf.requester_sub:
+            raise DelegationPolicyError(
+                "separation_of_duties_violation",
+                f"Four-Eyes SoD violation: requester {wf.requester_sub!r} cannot self-approve PO",
+                status_code=403,
+            )
+
+        if approver_claims.sub in wf.approved_by_list:
+            raise DelegationPolicyError(
+                "duplicate_quorum_vote",
+                f"Approver {approver_claims.sub!r} already signed workflow {wf.workflow_id!r}",
+                status_code=409,
+            )
+
         if "erp:po:approve" not in approver_claims.scopes or (
             wf.amount_usd > approver_claims.po_approval_limit_usd
         ):
@@ -201,6 +247,30 @@ class DurableApprovalGate:
                 ),
                 status_code=403,
             )
+
+        # Enforce WebAuthn FIDO2 Hardware Passkey Step-Up if registered for this executive
+        registered_pub = self._passkeys_by_sub.get(approver_claims.sub)
+        if registered_pub is not None:
+            if decision.webauthn_assertion is None:
+                raise PermissionError(
+                    f"Approver {approver_claims.sub!r} requires FIDO2/WebAuthn step-up assertion"
+                )
+            verify_webauthn_stepup_assertion(
+                decision.webauthn_assertion,
+                public_key_pem=registered_pub,
+                expected_rp_id=self._rp_id,
+                expected_origin=self._origin,
+                workflow_id=wf.workflow_id,
+                payload_hash=wf.payload_sha256,
+                snapshot_etag=wf.snapshot_vendor_etag,
+            )
+            self._sli.inc_counter("aegis_webauthn_stepup_verifications_total", 1.0)
+
+        updated_approvers = [*wf.approved_by_list, approver_claims.sub]
+        if len(updated_approvers) < wf.required_quorum:
+            self._repo.record_partial_quorum_vote(wf.workflow_id, updated_approvers)
+            self._sli.inc_counter("aegis_quorum_partial_votes_total", 1.0)
+            return self._repo.get(wf.workflow_id)
 
         commit_rpc = self._mcp.handle_jsonrpc(
             JSONRPCRequest(
@@ -237,6 +307,7 @@ class DurableApprovalGate:
                 approver_sub=approver_claims.sub,
                 sap_po_number=None,
                 failure_reason=reason,
+                approved_by=updated_approvers,
             )
             self._audit.append(
                 tenant_id=wf.tenant_id,
@@ -256,7 +327,9 @@ class DurableApprovalGate:
             approver_sub=approver_claims.sub,
             sap_po_number=po_num,
             failure_reason=None,
+            approved_by=updated_approvers,
         )
+        self._sli.inc_counter("aegis_quorum_completed_workflows_total", 1.0)
         self._audit.append(
             tenant_id=wf.tenant_id,
             event_type=AuditEventType.TEMPORAL_GATE_DECIDED,
@@ -268,6 +341,7 @@ class DurableApprovalGate:
                 "workflow_id": wf.workflow_id,
                 "sap_po_number": po_num,
                 "original_requester": wf.requester_sub,
+                "approvers": updated_approvers,
                 "amount_usd": wf.amount_usd,
             },
         )
@@ -275,11 +349,13 @@ class DurableApprovalGate:
 
 
 __all__ = [
+    "AESGCMPayloadCodec",
     "ApprovalGateRequest",
     "ApprovalWorkflowRecord",
     "DurableApprovalGate",
     "SlackDecisionPayload",
     "SlackWebhookVerificationError",
+    "WebAuthnStepUpAssertion",
     "create_approval_gate_app",
     "sign_slack_webhook_payload",
     "verify_slack_webhook_signature",

@@ -23,7 +23,7 @@ _MASTER_PII_RE = re.compile(
     rf"|(?P<PERSON>{_FULL_PERSON_PATTERN})"
 )
 
-_SURROGATE_TAG_RE = re.compile(r"^<(?:SSN|CC|IBAN|EMAIL|PERSON)_\d{3}>$")
+_SURROGATE_TAG_RE = re.compile(r"^<(?:SSN|CC|IBAN|EMAIL|PERSON|DEAL|CLIENT)_\d{3}>$")
 MAX_SURROGATE_TAG_LEN = 18
 
 
