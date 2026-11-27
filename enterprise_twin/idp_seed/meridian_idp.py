@@ -89,6 +89,19 @@ MERIDIAN_PERSONAS: dict[str, HumanPrincipal] = {
         auth_method="oidc",
         upstream_session_id="idp-sess-david-005",
     ),
+    "sara.patel": HumanPrincipal(
+        tenant_id="meridian-fin",
+        subject_id="sara.patel",
+        email="sara.patel@meridian.fin",
+        display_name="Sara Patel (CISO & Dual-Control Approver)",
+        department="SEC_OPS",
+        groups=("platform-admins", "sec-ops", "all-employees"),
+        scopes=("admin:control_plane", "admin:prompts:write", "admin:traces:read", "rag:read"),
+        clearance=ClearanceLevel.TOP_SECRET_MA,
+        po_approval_limit_usd=100_000,
+        auth_method="oidc",
+        upstream_session_id="idp-sess-sara-006",
+    ),
 }
 
 

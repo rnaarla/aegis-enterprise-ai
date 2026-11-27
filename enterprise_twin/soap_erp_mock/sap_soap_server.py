@@ -17,9 +17,7 @@ from dataclasses import dataclass
 from fastapi import FastAPI, Request, Response
 from lxml import etree
 
-SOAP12_ENV_NS = "http://www.w3.org/2003/05/soap-envelope"
-WSSE_NS = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
-SAP_BAPI_NS = "urn:sap-com:document:sap:rfc:functions"
+from mcp_erp_bridge.soap_client import SAP_BAPI_NS, SOAP12_ENV_NS, WSSE_NS
 
 
 @dataclass

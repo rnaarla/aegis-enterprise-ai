@@ -41,6 +41,14 @@ class AegisTelemetry:
         self._provider.add_span_processor(SimpleSpanProcessor(self.collector))
         self._tracer = self._provider.get_tracer(service_name)
 
+    def finished_spans(self) -> list[ReadableSpan]:
+        """Encapsulated span snapshot accessor (preserves Law of Demeter for callers)."""
+        return self.collector.get_finished_spans()
+
+    def clear_spans(self) -> None:
+        """Clear recorded spans through the facade without reaching into `collector`."""
+        self.collector.clear()
+
     @contextmanager
     def span(
         self,

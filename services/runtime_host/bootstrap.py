@@ -1,8 +1,7 @@
-"""Zero-Arg Production ASGI Factory Bootstrapper (`uvicorn --factory`).
+"""Outer Composition Root (`IoC / Dependency Injection`) wiring ASGI services from env.
 
-Allows immutable `@sha256` container images (`deploy/docker/Dockerfile`) to boot any of the
-Aegis HTTP microservices purely via `AEGIS_SERVICE_NAME` and `AegisSettings` environment
-variables, wiring production adapters or the isolated Meridian Twin deterministically.
+Lives in `services/runtime_host` (outer ring) rather than `packages/aegis_core` (innermost
+domain ring) so `aegis_core` maintains zero outward imports of services or `enterprise_twin`.
 """
 
 from __future__ import annotations
@@ -67,11 +66,8 @@ def create_service_app_from_env(service_name: str | None = None) -> FastAPI:
     if target == "mcp-erp":
         from enterprise_twin.soap_erp_mock.sap_soap_server import LegacySAPSoapTwin
 
-        from mcp_erp_bridge.bridge import (
-            DirectInProcessSOAPTransport,
-            MCPERPBridgeServer,
-            create_mcp_erp_app,
-        )
+        from mcp_erp_bridge.app import create_mcp_erp_app
+        from mcp_erp_bridge.bridge import DirectInProcessSOAPTransport, MCPERPBridgeServer
 
         bridge = MCPERPBridgeServer(
             broker=broker,
@@ -90,7 +86,8 @@ def create_service_app_from_env(service_name: str | None = None) -> FastAPI:
         from enterprise_twin.soap_erp_mock.sap_soap_server import LegacySAPSoapTwin
 
         from mcp_erp_bridge.bridge import DirectInProcessSOAPTransport, MCPERPBridgeServer
-        from temporal_approval_gate.gate import DurableApprovalGate, create_approval_gate_app
+        from temporal_approval_gate.app import create_approval_gate_app
+        from temporal_approval_gate.gate import DurableApprovalGate
 
         bridge = MCPERPBridgeServer(
             broker=broker,
@@ -110,10 +107,8 @@ def create_service_app_from_env(service_name: str | None = None) -> FastAPI:
     if target == "admin-portal":
         from enterprise_twin.corpus_seed.historical_tickets import generate_500_historical_tickets
 
-        from admin_control_plane.portal_api import (
-            ControlPlaneService,
-            create_admin_control_plane_app,
-        )
+        from admin_control_plane.app import create_admin_control_plane_app
+        from admin_control_plane.portal_api import ControlPlaneService
         from finops_telemetry.engine import FinOpsTelemetryEngine
         from shadow_replay_harness.harness import ShadowReplayHarness
 

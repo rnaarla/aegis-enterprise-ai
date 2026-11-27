@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import IntEnum, StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -310,3 +310,35 @@ class AuditRecord(BaseModel):
     detail: dict[str, str | int | float | bool | list[str]]
     prev_hash: str
     entry_hash: str
+
+
+class JSONRPCRequest(BaseModel):
+    """Immutable JSON-RPC 2.0 request envelope shared across MCP transports and callers."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    jsonrpc: str = "2.0"
+    id: int | str | None = None
+    method: str = Field(min_length=1, max_length=128)
+    params: dict[str, Any] | None = None
+
+
+class HistoricalSupportTicket(BaseModel):
+    """Point-in-time (`t_0`) historical evaluation ticket Value Object (temporal-leakage safe)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ticket_id: str
+    created_at_iso: str
+    category: Literal[
+        "po_auto_create_under_50k",
+        "po_escalate_over_50k",
+        "blocked_vendor_refusal",
+        "unauthorized_mnpi_refusal",
+    ]
+    requester_role: Literal["procurement_vp", "procurement_specialist", "junior_analyst", "managing_director"]
+    messy_user_message: str
+    world_state_at_t0: dict[str, str | float | bool]
+    mutated_state_today: dict[str, str | float | bool]
+    expected_tool_name: str
+    expected_amount_usd: float | None = None

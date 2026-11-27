@@ -8,18 +8,16 @@ from collections.abc import AsyncIterator, Iterator
 from typing import Any, Protocol
 
 import anyio
-from fastapi import FastAPI, Header
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from aegis_core.crypto import TokenVerificationError
 from aegis_core.http_middleware import (
-    MissingBearerTokenError,
-    extract_bearer_token,
     install_aegis_http_layer,
+    require_bearer_token,
 )
 from aegis_core.models import AuditEventType
-from aegis_core.ports import AuditLedgerPort
+from aegis_core.ports import AuditLedgerPort, TokenVerifierPort
 from aegis_core.sli_metrics import GLOBAL_SLI_REGISTRY, SLIRegistry
 from pii_unmasking_proxy.fpe_and_automaton import (
     AhoCorasickEntityMatcher,
@@ -29,7 +27,6 @@ from pii_unmasking_proxy.fpe_and_automaton import (
 )
 from pii_unmasking_proxy.sse_stream import StreamingSurrogateRehydrator, mask_text_entities
 from pii_unmasking_proxy.vault import EnvelopeEncryptedPIIVault
-from sso_delegation_broker.broker import DelegationPolicyError, SSODelegationBroker
 
 _STREAM_END = object()
 
@@ -75,7 +72,7 @@ class DeterministicPIIProxy:
     def __init__(
         self,
         *,
-        broker: SSODelegationBroker,
+        broker: TokenVerifierPort,
         vault: EnvelopeEncryptedPIIVault,
         upstream_llm: UpstreamChatBackendPort,
         audit_ledger: AuditLedgerPort,
@@ -332,20 +329,15 @@ class DeterministicPIIProxy:
 
 
 def create_pii_proxy_app(proxy: DeterministicPIIProxy) -> FastAPI:
-    """Non-blocking FastAPI `/v1/chat/completions` with SRE SLIs & exfiltration enforcement."""
+    """Non-blocking FastAPI `/v1/chat/completions` with SRE SLIs & declarative auth boundary."""
     app = FastAPI(title="Aegis Deterministic PII Unmasking Proxy", version="0.3.0")
     install_aegis_http_layer(app, service_name="pii-unmasking-proxy")
 
     @app.post("/v1/chat/completions", response_model=None)
     async def chat_completions(
         req: ChatCompletionRequest,
-        authorization: str | None = Header(default=None),
+        token: str = Depends(require_bearer_token),
     ) -> JSONResponse | StreamingResponse:
-        try:
-            token = extract_bearer_token(authorization)
-        except MissingBearerTokenError:
-            return JSONResponse(status_code=401, content={"error": "missing_bearer_token"})
-
         try:
             if not req.stream:
                 result = await anyio.to_thread.run_sync(
@@ -371,7 +363,5 @@ def create_pii_proxy_app(proxy: DeterministicPIIProxy) -> FastAPI:
                 status_code=422,
                 content={"error": "pii_exfiltration_blocked", "detail": str(exc)},
             )
-        except (TokenVerificationError, DelegationPolicyError) as exc:
-            return JSONResponse(status_code=401, content={"error": str(exc)})
 
     return app

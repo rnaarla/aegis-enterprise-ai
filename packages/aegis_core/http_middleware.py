@@ -1,4 +1,4 @@
-"""Shared FastAPI SRE Observability Middleware, `/metrics`, Graceful Drain & `/readyz` Probes."""
+"""Shared FastAPI SRE Observability Middleware, DRY Auth Dependencies & Exception Handlers."""
 
 from __future__ import annotations
 
@@ -10,9 +10,11 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from aegis_core.crypto import TokenVerificationError
+from aegis_core.ports import DelegationPolicyError
 from aegis_core.sli_metrics import GLOBAL_SLI_REGISTRY, SLIRegistry
 
 logger = logging.getLogger("aegis.sre")
@@ -35,6 +37,11 @@ def extract_bearer_token(authorization: str | None) -> str:
     if not token:
         raise MissingBearerTokenError("Empty authorization token")
     return token
+
+
+def require_bearer_token(authorization: str | None = Header(default=None)) -> str:
+    """Reusable FastAPI `Depends(require_bearer_token)` failing fast at the HTTP boundary."""
+    return extract_bearer_token(authorization)
 
 
 class ServiceLifecycleState:
@@ -107,12 +114,34 @@ def install_aegis_http_layer(
     readiness_check: Callable[[], bool] | None = None,
     dependency_checks: dict[str, Callable[[], bool]] | None = None,
     sli_registry: SLIRegistry | None = None,
+    token_error_status_code: int = 401,
 ) -> ServiceLifecycleState:
-    """Install Golden Signal SLIs, `/metrics`, `/v1/sli/summary`, `/healthz`, `/readyz` & drain."""
+    """Install Golden Signal SLIs, boundary exception handlers, `/metrics`, `/readyz` & drain."""
     registry = sli_registry if sli_registry is not None else GLOBAL_SLI_REGISTRY
     lifecycle = ServiceLifecycleState(service_name)
     app.state.aegis_lifecycle = lifecycle
     app.state.aegis_sli_registry = registry
+
+    @app.exception_handler(MissingBearerTokenError)
+    async def _handle_missing_bearer(_req: Request, exc: MissingBearerTokenError) -> JSONResponse:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "missing_bearer_token", "error_description": str(exc)},
+        )
+
+    @app.exception_handler(TokenVerificationError)
+    async def _handle_bad_token(_req: Request, exc: TokenVerificationError) -> JSONResponse:
+        return JSONResponse(
+            status_code=token_error_status_code,
+            content={"error": "invalid_token", "error_description": str(exc)},
+        )
+
+    @app.exception_handler(DelegationPolicyError)
+    async def _handle_policy_error(_req: Request, exc: DelegationPolicyError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": exc.oauth_error, "error_description": exc.description},
+        )
 
     @app.middleware("http")
     async def _sre_observability_middleware(
@@ -225,9 +254,7 @@ def install_aegis_http_layer(
     @app.get("/v1/sli/summary")
     def sli_summary() -> dict[str, Any]:
         slo = registry.evaluate_slo(service_name)
-        lat = registry.histogram_snapshot(
-            "aegis_http_request_duration_seconds",
-        )
+        lat = registry.histogram_snapshot("aegis_http_request_duration_seconds")
         return {
             "service": service_name,
             "slo": {

@@ -7,26 +7,7 @@ temporal leakage during offline shadow evaluation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
-
-
-@dataclass(frozen=True)
-class HistoricalSupportTicket:
-    ticket_id: str
-    created_at_iso: str
-    category: Literal[
-        "po_auto_create_under_50k",
-        "po_escalate_over_50k",
-        "blocked_vendor_refusal",
-        "unauthorized_mnpi_refusal",
-    ]
-    requester_role: Literal["procurement_vp", "junior_analyst"]
-    messy_user_message: str
-    world_state_at_t0: dict[str, str | float | bool]
-    mutated_state_today: dict[str, str | float | bool]
-    expected_tool_name: str
-    expected_amount_usd: float | None
+from aegis_core.models import HistoricalSupportTicket
 
 
 def generate_500_historical_tickets(count: int = 500) -> list[HistoricalSupportTicket]:

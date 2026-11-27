@@ -156,7 +156,7 @@ def _make_broker() -> tuple[SSODelegationBroker, MeridianIdentityProvider, InMem
 
 
 def test_project2_airgap_bundle_and_zero_egress_invariants() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
     report = verify_airgap_bundle_readiness(repo_root)
     assert report.all_passed is True
     assert len(report.findings) >= 6

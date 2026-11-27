@@ -18,7 +18,6 @@ from fastapi.testclient import TestClient
 
 from admin_control_plane.portal_api import ControlPlaneService, create_admin_control_plane_app
 from aegis_core.audit import InMemoryAuditLedger
-from aegis_core.bootstrap import create_service_app_from_env
 from aegis_core.crypto import SigningKeyPair, compute_jwk_thumbprint_from_public_jwk
 from aegis_core.models import (
     ClearanceLevel,
@@ -44,6 +43,7 @@ from legacy_ingestor.pipeline import LegacyIngestionPipeline
 from mcp_erp_bridge.bridge import DirectInProcessSOAPTransport, MCPERPBridgeServer
 from pii_unmasking_proxy.proxy import DeterministicPIIProxy, create_pii_proxy_app
 from pii_unmasking_proxy.vault import EnvelopeEncryptedPIIVault
+from runtime_host.bootstrap import create_service_app_from_env
 from secure_rag_engine.app import create_rag_app
 from secure_rag_engine.embeddings import DeterministicFinancialEmbedder
 from secure_rag_engine.engine import SecureRAGEngine
@@ -727,34 +727,15 @@ def test_all_v2_http_transports_bootstrap_metrics_drain_quorum_and_governance(
         == 400
     )
 
-    # Co-sign Dual-Control secret rotation using a SECOND distinct admin principal!
-    from aegis_core.crypto import mint_delegated_jwt
-    from aegis_core.models import HumanPrincipal
-
-    second_admin_jwt, sec_jti, sec_exp = mint_delegated_jwt(
-        signing_key=broker._keyring.active_key,
-        issuer=broker.issuer,
-        audience=broker.default_audience,
-        principal=HumanPrincipal(
-            tenant_id="meridian-fin",
-            subject_id="ciso.second.admin",
-            email="ciso@meridian.fin",
-            display_name="Chief Information Security Officer",
-            department="SEC_OPS",
-            groups=("sec-ops",),
-            scopes=("admin:control_plane",),
-            clearance=ClearanceLevel.TOP_SECRET_MA,
-            po_approval_limit_usd=0,
-            auth_method="oidc",
-            upstream_session_id="sess-ciso",
-        ),
-        agent_spiffe_id="spiffe://meridian.fin/agent/meridian-admin-console",
-        agent_client_id="meridian-admin-console",
-        effective_scopes=("admin:control_plane",),
-        effective_clearance=ClearanceLevel.INTERNAL,
-        ttl_seconds=120,
-    )
-    _ = (sec_jti, sec_exp)
+    # Co-sign Dual-Control secret rotation using a SECOND distinct admin principal via public API!
+    second_admin_jwt = broker.exchange_token(
+        TokenExchangeRequest(
+            subject_token=idp.issue_oidc_token_for_persona("sara.patel"),
+            subject_token_type="urn:ietf:params:oauth:token-type:access_token",
+            agent_id="meridian-admin-console",
+            requested_scopes=["admin:control_plane"],
+        )
+    ).access_token
     cosign_r = cp_client.post(
         f"/v1/admin/dual-control/{prop_r.json()['proposal_id']}/approve",
         headers={"Authorization": f"Bearer {second_admin_jwt}"},

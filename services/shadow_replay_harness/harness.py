@@ -5,9 +5,9 @@ from __future__ import annotations
 import re
 from typing import Protocol
 
-from enterprise_twin.corpus_seed.historical_tickets import HistoricalSupportTicket
 from pydantic import BaseModel, ConfigDict, Field
 
+from aegis_core.models import HistoricalSupportTicket
 from shadow_replay_harness.specifications import (
     BlockedSAPVendorSnapshotSpec,
     ExceedsExecutivePOGateSpec,

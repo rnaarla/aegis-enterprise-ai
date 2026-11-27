@@ -13,7 +13,12 @@ from aegis_core.models import (
     ScoredChunk,
     SecurityReceipt,
 )
-from aegis_core.ports import AuditLedgerPort, RetrievalStorePort
+from aegis_core.ports import (
+    AuditLedgerPort,
+    DelegationPolicyError,
+    RetrievalStorePort,
+    TokenVerifierPort,
+)
 from aegis_core.sli_metrics import GLOBAL_SLI_REGISTRY, SLIRegistry
 from aegis_core.telemetry import AegisTelemetry
 from secure_rag_engine.reranker_grounding import (
@@ -21,7 +26,6 @@ from secure_rag_engine.reranker_grounding import (
     LocalCrossEncoderReranker,
     verify_answer_citations,
 )
-from sso_delegation_broker.broker import DelegationPolicyError, SSODelegationBroker
 
 
 class RetrievalAuthorizationError(Exception):
@@ -39,7 +43,7 @@ class SecureRAGEngine:
     def __init__(
         self,
         *,
-        broker: SSODelegationBroker,
+        broker: TokenVerifierPort,
         store: RetrievalStorePort,
         audit_ledger: AuditLedgerPort,
         telemetry: AegisTelemetry | None = None,

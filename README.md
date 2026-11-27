@@ -91,19 +91,21 @@ Every HTTP service installs `install_aegis_http_layer` (`packages/aegis_core/htt
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 
-# 2. Run strict static analyzers & IaC validators (mypy --strict across 98 files + tsc 6.0 + ruff + Helm + AWS/Azure TF)
+# 2. Run strict static analyzers & IaC validators (mypy --strict across 101 files + tsc 6.0 + ruff + Helm + AWS/Azure TF)
 make typecheck lint helm-lint tf-validate
 
 # 3. Run individual verification tiers
-make test-unit          # Tier 1: Unit, property fuzzing, crypto, COBOL VB/ODO, FPE/Aho-Corasick, OSCAL
+make test-unit          # Tier 1: Unit, AST Hexagonal boundary fitness, property fuzzing, crypto, FPE/Aho-Corasick
 make test-integration   # Tier 2: Live Postgres 18 Transitive RLS, Temporal 72h SLA, Quorum/FIDO2, OCR, Drain
 make test-system        # Tier 3: 6-hop HTTP enterprise journey + CISO PoV + 12-module master PoV
 make test-load          # Tier 4: Multi-worker concurrent burst load, SAP AIMD chaos & NFR latency/leak gates
 make test-ts            # TypeScript 6.0 Admin Portal SDK, Canary/Explain/WORM & Flamegraph suite
 
-# 4. Run full release gate (enforces >= 95% statement coverage across 5,700+ statements)
+# 4. Run full release gate (enforces >= 95% statement coverage across 5,600+ statements)
 make verify-all
 ```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the concentric Hexagonal dependency rings, applied engineering principles, and explicit YAGNI / First-Principles ADRs.
 
 ---
 

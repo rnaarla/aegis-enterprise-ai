@@ -152,9 +152,9 @@ def test_unit_core_crypto_edge_cases_and_telemetry() -> None:
     tel = AegisTelemetry("unit-svc")
     with tel.span("unit.op", {"k": "v"}):
         pass
-    assert len(tel.collector.get_finished_spans()) == 1
-    tel.collector.clear()
-    assert len(tel.collector.get_finished_spans()) == 0
+    assert len(tel.finished_spans()) == 1
+    tel.clear_spans()
+    assert len(tel.finished_spans()) == 0
     tel.collector.shutdown()
 
     assert DocumentClassification.TOP_SECRET_MA.to_clearance() == ClearanceLevel.TOP_SECRET_MA

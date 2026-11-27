@@ -10,11 +10,11 @@ from typing import Any
 from aegis_core.aimd import AIMDConcurrencyLimiter, BackpressureShedError
 from aegis_core.crypto import TokenVerificationError
 from aegis_core.dsa import BoundedLRUTTLCache
-from aegis_core.models import AuditEventType, DelegatedTokenClaims
-from aegis_core.ports import AuditLedgerPort
+from aegis_core.models import AuditEventType, DelegatedTokenClaims, JSONRPCRequest
+from aegis_core.ports import AuditLedgerPort, DelegationPolicyError, TokenVerifierPort
 from aegis_core.sli_metrics import GLOBAL_SLI_REGISTRY, SLIRegistry
 from aegis_core.telemetry import AegisTelemetry
-from mcp_erp_bridge.app import JSONRPCRequest, create_mcp_erp_app
+from mcp_erp_bridge.app import create_mcp_erp_app
 from mcp_erp_bridge.soap_client import (
     DirectInProcessSOAPTransport,
     HttpSOAPTransport,
@@ -27,7 +27,6 @@ from mcp_erp_bridge.wsdl_compiler import (
     MultiERPSagaCoordinator,
     compile_wsdl_to_mcp_tools,
 )
-from sso_delegation_broker.broker import DelegationPolicyError, SSODelegationBroker
 
 PO_EXECUTIVE_GATE_USD = 50_000.0
 
@@ -38,7 +37,7 @@ class MCPERPBridgeServer:
     def __init__(
         self,
         *,
-        broker: SSODelegationBroker,
+        broker: TokenVerifierPort,
         soap_transport: SOAPTransportPort,
         audit_ledger: AuditLedgerPort,
         wsse_username: str = "SVC_AEGIS_RFC",

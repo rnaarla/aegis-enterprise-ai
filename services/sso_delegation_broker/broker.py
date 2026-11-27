@@ -28,6 +28,9 @@ from aegis_core.ports import (
     IdentityProviderPort,
     RevocationStorePort,
 )
+from aegis_core.ports import (
+    DelegationPolicyError as DelegationPolicyError,
+)
 from aegis_core.sli_metrics import GLOBAL_SLI_REGISTRY, SLIRegistry
 from aegis_core.telemetry import AegisTelemetry
 from sso_delegation_broker.dpop_ssf import (
@@ -35,16 +38,6 @@ from sso_delegation_broker.dpop_ssf import (
     SSFSecurityEventReceiver,
     verify_mtls_cert_thumbprint,
 )
-
-
-class DelegationPolicyError(Exception):
-    """RFC 6749 / RFC 8693 compliant OAuth error with HTTP status mapping."""
-
-    def __init__(self, oauth_error: str, description: str, status_code: int = 400) -> None:
-        super().__init__(description)
-        self.oauth_error = oauth_error
-        self.description = description
-        self.status_code = status_code
 
 
 def _attenuate_rar_details(

@@ -1,8 +1,12 @@
-"""Hexagonal enterprise port interfaces enabling zero-code Day-1 production cutover."""
+"""Hexagonal enterprise port interfaces & domain boundary errors (Dependency Inversion).
+
+Every microservice in `services/` programs strictly against these `Protocol` interfaces
+rather than concrete peer service implementations (`Program to an Interface, not an Implementation`).
+"""
 
 from __future__ import annotations
 
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from aegis_core.models import (
     AgentManifest,
@@ -11,9 +15,22 @@ from aegis_core.models import (
     DelegatedTokenClaims,
     DocumentChunk,
     HumanPrincipal,
+    JSONRPCRequest,
     ReBACTuple,
     ScoredChunk,
+    TokenExchangeRequest,
+    TokenExchangeResponse,
 )
+
+
+class DelegationPolicyError(Exception):
+    """RFC 6749 / RFC 8693 compliant OAuth/policy boundary error with HTTP status mapping."""
+
+    def __init__(self, oauth_error: str, description: str, status_code: int = 400) -> None:
+        super().__init__(description)
+        self.oauth_error = oauth_error
+        self.description = description
+        self.status_code = status_code
 
 
 @runtime_checkable
@@ -29,7 +46,6 @@ class IdentityProviderPort(Protocol):
             "urn:ietf:params:oauth:token-type:saml2",
         ],
     ) -> HumanPrincipal:
-        """Cryptographically validate upstream IdP credential and extract HumanPrincipal."""
         ...
 
 
@@ -38,7 +54,61 @@ class AgentRegistryPort(Protocol):
     """Port for resolving registered non-human agent manifests and capability ceilings."""
 
     def get_agent(self, agent_id: str) -> AgentManifest | None:
-        """Fetch agent manifest by client ID."""
+        ...
+
+
+@runtime_checkable
+class TokenVerifierPort(Protocol):
+    """Inbound verification port consumed by downstream resource servers (RAG, MCP, PII, Admin)."""
+
+    def verify_and_check_revocation(
+        self,
+        token: str,
+        *,
+        required_scope: str | None = None,
+        dpop_proof_jwt: str | None = None,
+        expected_htm: str | None = None,
+        expected_htu: str | None = None,
+        presented_mtls_x5t_s256: str | None = None,
+        now_epoch: int | None = None,
+    ) -> DelegatedTokenClaims:
+        ...
+
+
+@runtime_checkable
+class TokenBrokerPort(TokenVerifierPort, Protocol):
+    """Full token exchange + verification port used by orchestrators (e.g. Temporal Gate)."""
+
+    def exchange_token(
+        self,
+        req: TokenExchangeRequest,
+        *,
+        dpop_proof_jwt: str | None = None,
+        http_method: str = "POST",
+        http_url: str = "https://auth.aegis.meridian.fin/v1/oauth/token",
+        now_epoch: int | None = None,
+    ) -> TokenExchangeResponse:
+        ...
+
+
+@runtime_checkable
+class MCPToolCallerPort(Protocol):
+    """Port decoupling workflow coordinators (P7) from concrete MCP server implementations (P5)."""
+
+    def handle_jsonrpc(
+        self,
+        rpc: JSONRPCRequest,
+        *,
+        bearer_token: str | None,
+    ) -> dict[str, Any]:
+        ...
+
+
+@runtime_checkable
+class SOAPEnvelopeHandlerPort(Protocol):
+    """Port decoupling in-process SOAP test transports from `enterprise_twin` concrete classes."""
+
+    def handle_soap_envelope(self, raw_xml: bytes) -> tuple[int, bytes]:
         ...
 
 
@@ -53,23 +123,18 @@ class RevocationStorePort(Protocol):
         agent_id: str,
         exp_epoch: int,
     ) -> None:
-        """Track active delegated token metadata until natural expiration."""
         ...
 
     def revoke_jti(self, jti: str, exp_epoch: int, reason: str) -> None:
-        """Immediately revoke a single delegated JWT by JTI."""
         ...
 
     def revoke_all_for_subject(self, human_subject: str, reason: str) -> int:
-        """Revoke every active delegated token acting on behalf of `human_subject`."""
         ...
 
     def revoke_all_for_agent(self, agent_id: str, reason: str) -> int:
-        """Emergency kill-switch: revoke every active token held by `agent_id`."""
         ...
 
     def is_revoked(self, jti: str, human_subject: str, agent_id: str) -> tuple[bool, str | None]:
-        """Return `(True, reason)` if JTI, human principal, or agent is revoked."""
         ...
 
 
@@ -88,42 +153,36 @@ class AuditLedgerPort(Protocol):
         decision: Literal["ALLOW", "DENY", "REVOKE"],
         detail: dict[str, str | int | float | bool | list[str]],
     ) -> AuditRecord:
-        """Atomically compute `SHA256(prev_hash || payload)` and persist record."""
-        ...
-
-    def list_records(self, tenant_id: str | None = None) -> list[AuditRecord]:
-        """Return ordered audit records for verification and export."""
         ...
 
     def verify_integrity(self) -> tuple[bool, str]:
-        """Recompute entire SHA-256 chain from genesis to detect tampering or gaps."""
+        ...
+
+    def list_records(self) -> list[AuditRecord]:
         ...
 
 
 @runtime_checkable
 class EmbeddingProviderPort(Protocol):
-    """Port for dense vector embedding generation (in-VPC vLLM, Azure OpenAI, or deterministic)."""
+    """Port for deterministic air-gapped or local GPU (`vLLM`/`Infinity`) dense embeddings."""
 
     @property
     def dimension(self) -> int:
-        """Vector dimensionality."""
         ...
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """Generate L2-normalized dense embeddings for a batch of texts."""
         ...
 
 
 @runtime_checkable
 class RetrievalStorePort(Protocol):
-    """Port for kernel-enforced row-level secure hybrid retrieval."""
+    """Port for PostgreSQL `FORCE ROW LEVEL SECURITY` hybrid dense + lexical search."""
 
     def ingest_chunks(
         self,
         chunks: list[DocumentChunk],
         rebac_tuples: list[ReBACTuple],
     ) -> int:
-        """Persist chunks and ReBAC access tuples into the underlying store."""
         ...
 
     def retrieve_authorized(
@@ -132,8 +191,4 @@ class RetrievalStorePort(Protocol):
         query: str,
         top_k: int,
     ) -> tuple[list[ScoredChunk], str, bool]:
-        """Execute hybrid search bound strictly to `claims` inside an RLS transaction.
-
-        Returns `(scored_chunks, db_role_used, rls_forced)`.
-        """
         ...

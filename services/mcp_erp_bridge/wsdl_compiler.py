@@ -120,6 +120,16 @@ class DurableIdempotencyOutbox:
             )
             self._conn.commit()
 
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    def __enter__(self) -> DurableIdempotencyOutbox:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
 
 class MultiERPSagaCoordinator:
     """Executes multi-step ERP workflows and triggers reverse BAPI compensations on downstream failure."""

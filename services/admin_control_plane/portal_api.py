@@ -7,7 +7,6 @@ import threading
 from datetime import UTC, datetime
 from typing import Any
 
-from enterprise_twin.corpus_seed.historical_tickets import HistoricalSupportTicket
 from pydantic import BaseModel, ConfigDict
 
 from admin_control_plane.app import create_admin_control_plane_app
@@ -29,10 +28,11 @@ from aegis_core.crypto import SigningKeyPair
 from aegis_core.models import (
     AuditEventType,
     ClearanceLevel,
+    HistoricalSupportTicket,
     ReBACGroupHierarchyEdge,
     ReBACTuple,
 )
-from aegis_core.ports import AuditLedgerPort
+from aegis_core.ports import AuditLedgerPort, TokenVerifierPort
 from aegis_core.sli_metrics import GLOBAL_SLI_REGISTRY, SLIRegistry
 from aegis_core.telemetry import AegisTelemetry
 from finops_telemetry.engine import DepartmentROIReport, FinOpsTelemetryEngine
@@ -41,7 +41,6 @@ from shadow_replay_harness.harness import (
     ShadowReplayHarness,
     ShadowReplaySummary,
 )
-from sso_delegation_broker.broker import SSODelegationBroker
 
 
 class PromptPromotionError(Exception):
@@ -91,7 +90,7 @@ class ControlPlaneService:
     def __init__(
         self,
         *,
-        broker: SSODelegationBroker,
+        broker: TokenVerifierPort,
         replay_harness: ShadowReplayHarness,
         golden_tickets: list[HistoricalSupportTicket],
         finops_engine: FinOpsTelemetryEngine,
@@ -439,9 +438,17 @@ class ControlPlaneService:
             records=records,
         )
 
+    def canary_status(self) -> CanaryStatusView:
+        """Tell-Don't-Ask facade returning current canary rollout state."""
+        return self.canary.status()
+
+    def route_prompt_version(self, tenant_id: str, subject_id: str) -> str:
+        """Tell-Don't-Ask facade resolving active prompt version for `(tenant_id, subject_id)`."""
+        return self.canary.route_version(tenant_id, subject_id)
+
     def inspect_otel_traces(self, *, bearer_token: str) -> list[TraceSpanSummary]:
         self._broker.verify_and_check_revocation(bearer_token, required_scope="admin:traces:read")
-        spans = self._telemetry.collector.get_finished_spans()
+        spans = self._telemetry.finished_spans()
         summaries: list[TraceSpanSummary] = []
         for sp in spans:
             ctx = sp.get_span_context()

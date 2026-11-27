@@ -1,19 +1,14 @@
-"""FastAPI HTTP transport for Project 7 Async Temporal Approval Gate (Quorum + FIDO2)."""
+"""FastAPI HTTP transport for Project 7 Async Temporal Approval Gate (Streamlined)."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from fastapi import FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
-from aegis_core.http_middleware import (
-    MissingBearerTokenError,
-    extract_bearer_token,
-    install_aegis_http_layer,
-)
-from sso_delegation_broker.broker import DelegationPolicyError
+from aegis_core.http_middleware import install_aegis_http_layer, require_bearer_token
 from temporal_approval_gate.quorum_webauthn import WebAuthnStepUpAssertion
 from temporal_approval_gate.slack_signature import (
     SlackWebhookVerificationError,
@@ -48,14 +43,11 @@ def create_approval_gate_app(gate: DurableApprovalGate) -> FastAPI:
     @app.post("/v1/approvals/po", response_model=ApprovalWorkflowRecord)
     def submit_po(
         req: ApprovalGateRequest,
-        authorization: str | None = Header(default=None),
+        token: str = Depends(require_bearer_token),
     ) -> ApprovalWorkflowRecord | JSONResponse:
         try:
-            token = extract_bearer_token(authorization)
             return gate.submit_high_stakes_po(requester_bearer_token=token, req=req)
-        except MissingBearerTokenError as exc:
-            return JSONResponse(status_code=401, content={"error": str(exc)})
-        except Exception as exc:
+        except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
 
     @app.post("/v1/webhooks/slack/interactive", response_model=ApprovalWorkflowRecord)
@@ -82,11 +74,6 @@ def create_approval_gate_app(gate: DurableApprovalGate) -> FastAPI:
             return JSONResponse(
                 status_code=403,
                 content={"error": "webauthn_stepup_failed", "error_description": str(exc)},
-            )
-        except DelegationPolicyError as exc:
-            return JSONResponse(
-                status_code=exc.status_code,
-                content={"error": exc.oauth_error, "error_description": exc.description},
             )
 
     @app.get("/v1/approvals/{workflow_id}", response_model=ApprovalWorkflowRecord)

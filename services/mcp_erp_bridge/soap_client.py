@@ -1,36 +1,35 @@
-"""Resilient SOAP 1.2 + WS-Security Client & XXE-Hardened `BAPIRET2` XML Codec."""
+"""Resilient SOAP 1.2 + WS-Security Anti-Corruption Layer & XXE-Hardened `BAPIRET2` Codec."""
 
 from __future__ import annotations
 
 from typing import Protocol
 
 import httpx
-from enterprise_twin.soap_erp_mock.sap_soap_server import (
-    SAP_BAPI_NS,
-    SOAP12_ENV_NS,
-    WSSE_NS,
-    LegacySAPSoapTwin,
-)
 from lxml import etree
 
+from aegis_core.ports import SOAPEnvelopeHandlerPort
 from aegis_core.resilience import (
     CircuitBreaker,
     TransientDependencyError,
     execute_with_full_jitter_retry,
 )
 
+SOAP12_ENV_NS = "http://www.w3.org/2003/05/soap-envelope"
+WSSE_NS = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+SAP_BAPI_NS = "urn:sap-com:document:sap:rfc:functions"
+
 
 class SOAPTransportPort(Protocol):
-    """Pluggable SOAP 1.2 transport (resilient HTTP/mTLS in prod, direct twin in unit tests)."""
+    """Pluggable SOAP 1.2 transport (resilient HTTP/mTLS in prod, direct handler in tests)."""
 
     def post_envelope(self, xml_payload: bytes) -> tuple[int, bytes]:
         ...
 
 
 class DirectInProcessSOAPTransport:
-    """In-process adapter to `LegacySAPSoapTwin` using identical raw XML byte serialization."""
+    """In-process adapter to any `SOAPEnvelopeHandlerPort` (zero `enterprise_twin` coupling)."""
 
-    def __init__(self, twin: LegacySAPSoapTwin) -> None:
+    def __init__(self, twin: SOAPEnvelopeHandlerPort) -> None:
         self._twin = twin
 
     def post_envelope(self, xml_payload: bytes) -> tuple[int, bytes]:

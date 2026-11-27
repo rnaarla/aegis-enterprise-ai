@@ -31,10 +31,12 @@ from aegis_core.models import (
     ClearanceLevel,
     DocumentChunk,
     DocumentClassification,
+    JSONRPCRequest,
     ReBACTuple,
     RetrievalQuery,
     TokenExchangeRequest,
 )
+from aegis_core.pii_scanner import passes_luhn_checksum
 from aegis_core.sli_metrics import SLIRegistry
 from aegis_core.telemetry import AegisTelemetry
 from edge_triage_router.router import (
@@ -43,12 +45,8 @@ from edge_triage_router.router import (
     LocalQuantizedTriageRouter,
 )
 from finops_telemetry.engine import FinOpsTelemetryEngine
-from mcp_erp_bridge.bridge import (
-    JSONRPCRequest,
-    MCPERPBridgeServer,
-)
+from mcp_erp_bridge.bridge import MCPERPBridgeServer
 from pii_unmasking_proxy.proxy import ChatCompletionRequest, ChatMessage, DeterministicPIIProxy
-from pii_unmasking_proxy.sse_stream import passes_luhn_checksum
 from pii_unmasking_proxy.vault import EnvelopeEncryptedPIIVault
 from secure_rag_engine.embeddings import DeterministicFinancialEmbedder
 from secure_rag_engine.engine import SecureRAGEngine
@@ -438,7 +436,7 @@ def test_production_chaos_wfq_gpu_priority_atomic_finops_and_canary_rollback() -
 
     # 2. P9 Atomic Budget Race: 40 concurrent threads attempting $1.50 spend against a $15.00 cap
     finops = FinOpsTelemetryEngine()
-    finops.budget_governor.set_monthly_budget("meridian-fin", "CORP_DEV", 15.0)
+    finops.configure_budget("meridian-fin", "CORP_DEV", 15.0)
 
     def _spend_worker(_i: int) -> str:
         return finops.evaluate_budget_gate(
@@ -483,7 +481,7 @@ def test_production_chaos_wfq_gpu_priority_atomic_finops_and_canary_rollback() -
     )
     for _ in range(12):
         cp.record_canary_sample(tenant_id="meridian-fin", is_error=True, latency_ms=2500.0)
-    status = cp.canary.status()
+    status = cp.canary_status()
     assert status.auto_rolled_back is True
     assert status.canary_weight_pct == 0
-    assert cp.canary.route_version("meridian-fin", "elena.vance") == "prompt-v1"
+    assert cp.route_prompt_version("meridian-fin", "elena.vance") == "prompt-v1"

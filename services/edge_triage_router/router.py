@@ -14,18 +14,17 @@ from enum import StrEnum
 from typing import Any, Literal, Protocol
 
 import httpx
-from fastapi import FastAPI, Header
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from aegis_core.crypto import TokenVerificationError
 from aegis_core.http_middleware import (
-    MissingBearerTokenError,
-    extract_bearer_token,
     install_aegis_http_layer,
+    require_bearer_token,
 )
 from aegis_core.models import AuditEventType
-from aegis_core.ports import AuditLedgerPort
+from aegis_core.pii_scanner import mask_text_entities
+from aegis_core.ports import AuditLedgerPort, TokenVerifierPort
 from aegis_core.resilience import (
     CircuitBreaker,
     TransientDependencyError,
@@ -38,8 +37,6 @@ from edge_triage_router.cascade_scheduler import (
     MultiLoRARegistry,
     PriorityClass,
 )
-from pii_unmasking_proxy.sse_stream import mask_text_entities
-from sso_delegation_broker.broker import DelegationPolicyError, SSODelegationBroker
 
 
 class DataTemperature(StrEnum):
@@ -192,7 +189,7 @@ class LocalQuantizedTriageRouter:
     def __init__(
         self,
         *,
-        broker: SSODelegationBroker,
+        broker: TokenVerifierPort,
         classifier: LocalTriageModelPort,
         audit_ledger: AuditLedgerPort,
         max_kv_cache_tokens: int = 32_768,
@@ -348,10 +345,9 @@ def create_edge_triage_app(router: LocalQuantizedTriageRouter) -> FastAPI:
     @app.post("/v1/triage", response_model=TriageRoutingResult)
     def triage(
         req: TriageRequest,
-        authorization: str | None = Header(default=None),
+        token: str = Depends(require_bearer_token),
     ) -> TriageRoutingResult | JSONResponse:
         try:
-            token = extract_bearer_token(authorization)
             return router.evaluate_and_route(
                 bearer_token=token,
                 prompt=req.prompt,
@@ -360,13 +356,9 @@ def create_edge_triage_app(router: LocalQuantizedTriageRouter) -> FastAPI:
                 enable_conformal_cascade=req.enable_conformal_cascade,
                 top_logprobs=req.top_logprobs,
             )
-        except MissingBearerTokenError as exc:
-            return JSONResponse(status_code=401, content={"error": str(exc)})
         except EdgeTriageOverloadError as exc:
             return JSONResponse(
                 status_code=503, content={"error": "gpu_overload", "detail": str(exc)}
             )
-        except (TokenVerificationError, DelegationPolicyError) as exc:
-            return JSONResponse(status_code=401, content={"error": str(exc)})
 
     return app

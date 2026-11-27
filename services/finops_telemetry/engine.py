@@ -201,6 +201,22 @@ class FinOpsTelemetryEngine:
             self._conn.commit()
         return cost
 
+    def configure_budget(
+        self, tenant_id: str, cost_center: str, monthly_cap_usd: float
+    ) -> None:
+        """Tell-Don't-Ask facade over the internal `AtomicBudgetGovernor`."""
+        self.budget_governor.set_monthly_budget(tenant_id, cost_center, monthly_cap_usd)
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    def __enter__(self) -> FinOpsTelemetryEngine:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
     def evaluate_budget_gate(
         self,
         *,
@@ -328,9 +344,7 @@ def create_finops_app(engine: FinOpsTelemetryEngine) -> FastAPI:
 
     @app.post("/v1/finops/budgets")
     def set_budget(req: SetBudgetRequest) -> dict[str, Any]:
-        engine.budget_governor.set_monthly_budget(
-            req.tenant_id, req.cost_center, req.monthly_cap_usd
-        )
+        engine.configure_budget(req.tenant_id, req.cost_center, req.monthly_cap_usd)
         return {"status": "configured", "monthly_cap_usd": req.monthly_cap_usd}
 
     @app.post("/v1/finops/budgets/evaluate", response_model=None)

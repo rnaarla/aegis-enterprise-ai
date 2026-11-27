@@ -8,11 +8,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from aegis_core.models import AuditEventType, TokenExchangeRequest
-from aegis_core.ports import AuditLedgerPort
+from aegis_core.models import AuditEventType, JSONRPCRequest, TokenExchangeRequest
+from aegis_core.ports import (
+    AuditLedgerPort,
+    DelegationPolicyError,
+    MCPToolCallerPort,
+    TokenBrokerPort,
+)
 from aegis_core.sli_metrics import GLOBAL_SLI_REGISTRY, SLIRegistry
-from mcp_erp_bridge.bridge import JSONRPCRequest, MCPERPBridgeServer
-from sso_delegation_broker.broker import DelegationPolicyError, SSODelegationBroker
 from temporal_approval_gate.app import SlackDecisionPayload, create_approval_gate_app
 from temporal_approval_gate.quorum_webauthn import (
     AESGCMPayloadCodec,
@@ -39,8 +42,8 @@ class DurableApprovalGate:
         self,
         *,
         db_path: Path,
-        broker: SSODelegationBroker,
-        mcp_bridge: MCPERPBridgeServer,
+        broker: TokenBrokerPort,
+        mcp_bridge: MCPToolCallerPort,
         audit_ledger: AuditLedgerPort,
         slack_hmac_key: str = "meridian_slack_hmac_key_v1",
         quorum_2_threshold_usd: float = 250_000.0,

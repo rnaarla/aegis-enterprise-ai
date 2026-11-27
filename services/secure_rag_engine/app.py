@@ -1,16 +1,12 @@
-"""FastAPI HTTP service for Project 4: Row-Level Secure RAG Engine (V2)."""
+"""FastAPI HTTP service for Project 4: Row-Level Secure RAG Engine (Streamlined)."""
 
 from __future__ import annotations
 
-from fastapi import FastAPI, Header
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from aegis_core.http_middleware import (
-    MissingBearerTokenError,
-    extract_bearer_token,
-    install_aegis_http_layer,
-)
+from aegis_core.http_middleware import install_aegis_http_layer, require_bearer_token
 from aegis_core.models import RetrievalQuery, RetrievalResponse, ScoredChunk
 from secure_rag_engine.engine import RetrievalAuthorizationError, SecureRAGEngine
 from secure_rag_engine.reranker_grounding import CitationVerificationResult
@@ -35,16 +31,10 @@ def create_rag_app(engine: SecureRAGEngine) -> FastAPI:
     @app.post("/v1/retrieve", response_model=RetrievalResponse)
     def retrieve(
         req: RetrievalQuery,
-        authorization: str | None = Header(default=None),
+        token: str = Depends(require_bearer_token),
     ) -> RetrievalResponse | JSONResponse:
         try:
-            token = extract_bearer_token(authorization)
             return engine.retrieve(bearer_token=token, request=req)
-        except MissingBearerTokenError as exc:
-            return JSONResponse(
-                status_code=401,
-                content={"error": "missing_token", "error_description": str(exc)},
-            )
         except RetrievalAuthorizationError as exc:
             return JSONResponse(
                 status_code=exc.status_code,

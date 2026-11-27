@@ -55,6 +55,7 @@ include = [
     "arch_scoper*",
     "admin_control_plane*",
     "airgap_verifier*",
+    "runtime_host*",
     "enterprise_twin*",
 ]
 
