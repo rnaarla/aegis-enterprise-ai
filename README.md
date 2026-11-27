@@ -10,8 +10,8 @@
 
 **Aegis Enterprise AI** is a production-ready-by-design control plane, zero-trust agent runtime, and Fortune 500 solution accelerator unifying **12 critical enterprise AI capabilities** in one strictly typed, load-verified monorepo.
 
-* **Live Fortune 500 Sales & CISO Proof-of-Value (`values-demo.yaml`):** Boots an isolated **Meridian Global Financial** digital twin (OIDC/SAML 2.0 IdP, legacy SAP ECC/S4HANA SOAP 1.2 server, `CP037`/`CP1140` `RECFM=VB` COBOL ledgers, ISO 20022 `pacs.008` wires, multi-clearance M&A deal documents, and 500 historical operations tickets) with **zero `if demo_mode:` shortcuts** in application code.
-* **Day-1 Regulated Production Cutover (`values-prod-airgap.yaml`):** Deploys immutable `@sha256`-pinned, non-root (`UID 65532`), offline Cosign/SBOM-attested containers into air-gapped banking, healthcare, and sovereign defense enclaves strictly via configuration swaps.
+* **Live Fortune 500 Sales & CISO Proof-of-Value (`values-demo.yaml`):** Boots an isolated **Meridian Global Financial** digital twin (OIDC/SAML 2.0 IdP, legacy SAP ECC/S4HANA SOAP 1.2 server, `CP037`/`CP1140` `RECFM=VB` COBOL ledgers, ISO 20022 `pacs.008` wires, multi-clearance M&A deal documents, and 500 historical operations tickets) with **zero `if demo_mode:` shortcuts** in domain service code.
+* **Day-1 Regulated Production Cutover (`values-prod-airgap.yaml`):** Deploys immutable `@sha256`-pinned, non-root (`UID 65532`), offline Cosign/SBOM-attested containers into air-gapped banking, healthcare, and sovereign defense enclaves strictly via outer-ring adapter wiring and configuration swaps.
 
 ---
 
@@ -55,11 +55,25 @@ flowchart TB
 
 ---
 
+## Hexagonal Topology & Architectural Streamlining
+
+All 101 Python modules and TypeScript SDK packages are organized into **3 concentric Hexagonal (Ports & Adapters) dependency rings**, enforced automatically on every commit via static AST import-graph assertions in [`tests/unit/test_architectural_boundaries.py`](tests/unit/test_architectural_boundaries.py) (full details and ADRs in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)):
+
+1. **Inner Kernel (`packages/aegis_core/`):** Zero imports from `services/*` or `enterprise_twin/*`. Houses frozen Pydantic Value Objects (`models.py`), structural `Protocol` Ports (`ports.py`: `TokenVerifierPort`, `TokenBrokerPort`, `MCPToolCallerPort`, `SOAPEnvelopeHandlerPort`, `AuditLedgerPort`), pure Functional Core algorithms (`pii_scanner.py`, `crypto.py`, `aimd.py`), SLI/OpenMetrics (`sli_metrics.py`), and shared FastAPI boundary middleware (`http_middleware.py`).
+2. **Middle Ring (`services/<12_bounded_contexts>/`):** Zero imports from `enterprise_twin/*` or `runtime_host/*`. Peer data-plane services depend strictly on `aegis_core.ports` interfaces (**Dependency Inversion**), expose Tell-Don't-Ask facades (`finished_spans()`, `configure_budget()`, `canary_status()`, `route_prompt_version()`) enforcing **Law of Demeter**, isolate SAP SOAP 1.2 / WS-Security behind an **Anti-Corruption Layer** (`mcp_erp_bridge/soap_client.py`), and manage SQLite WAL stores via deterministic context managers (`with ...:` / `close()`).
+3. **Outer Ring (`services/runtime_host/`, `enterprise_twin/`, `apps/admin_portal/`, `deploy/`, `tests/`):**
+   * **Explicit Composition Root (`services/runtime_host/bootstrap.py`):** Zero-argument `--factory` entrypoint (`runtime_host.bootstrap:create_service_app_from_env`) used by `Dockerfile` / `uvicorn`, keeping all wiring out of the domain kernel.
+   * **DRY HTTP Boundary Layer (`packages/aegis_core/http_middleware.py`):** Declarative `Depends(require_bearer_token)` injection and centralized `@app.exception_handler` hooks (`MissingBearerTokenError`, `TokenVerificationError`, `DelegationPolicyError`) eliminate repetitive auth/error boilerplate across all ASGI transports.
+   * **Strict 3-Tier Test Pyramid (`tests/{unit,integration,system}/`):** Zero loose root test files; AST hygiene tests fail the build if any test or cross-ring import drifts.
+   * **Deliberate KISS / YAGNI Discipline:** Explicitly rejects full Event Sourcing (using append-only hash-chained `audit_ledger` + ACID projections instead), eventual-consistency pub/sub buses on **PC/EC** security revocation/RLS paths, split-DB CQRS, custom Actor frameworks, and reflection-based DI containers.
+
+---
+
 ## Complete 12-Project Implementation & V2 Principal-Tier Feature Matrix
 
 | # | Project | Module Path | Core & V2 Principal-Tier Features Implemented | Quantitative NFR & SRE Guarantees |
 | :- | :--- | :--- | :--- | :--- |
-| **1** | **Enterprise SSO & Agent Delegation Broker** | `services/sso_delegation_broker/` | • **RFC 8693 Token Exchange** (`at+jwt`, 300s ceiling) over OIDC RS256 & XXE-safe SAML 2.0<br>• **RFC 9449 DPoP Proof Verification** (`htm`, `htu`, `ath`, single-use `jti` anti-replay) & **RFC 8705 mTLS (`cnf.x5t#S256`)** binding<br>• **Nested Multi-Hop Subdelegation (`act` Chain <= 3 hops)** with monotonic scope/TTL attenuation & cycle blocking<br>• **RFC 9396 Rich Authorization Requests (`authorization_details`)** narrowing PO USD ceilings & corpus sources<br>• **OpenID SSF / CAEP (`secevent+jwt`) Push Receiver** (`/v1/ssf/events`) + **Zero-Downtime `SigningKeyRing` Rotation** + `$O(\log N)$` / Redis revocation | `p95 <= 15ms`, `p99 <= 30ms`; `99.99%` availability SLO; zero token drops across live `kid` rollover |
+| **1** | **Enterprise SSO & Agent Delegation Broker** | `services/sso_delegation_broker/` | • **RFC 8693 Token Exchange** (`at+jwt`, 300s ceiling) over OIDC RS256 & XXE-safe SAML 2.0<br>• **RFC 9449 DPoP Proof Verification** (`htm`, `htu`, `ath`, single-use `jti` anti-replay) & **RFC 8705 mTLS (`cnf.x5t#S256`)** binding<br>• **Nested Multi-Hop Subdelegation (`act` Chain <= 3 hops)** with monotonic scope/TTL attenuation & cycle blocking<br>• **RFC 9396 Rich Authorization Requests (`authorization_details`)** narrowing PO USD ceilings & corpus sources<br>• **OpenID SSF / CAEP (`secevent+jwt`) Push Receiver** (`/v1/ssf/events`) + **Zero-Downtime `SigningKeyRing` Rotation** + `O(log N)` / Redis revocation | `p95 <= 15ms`, `p99 <= 30ms`; `99.99%` availability SLO; zero token drops across live `kid` rollover |
 | **2** | **One-Click Air-Gapped Helm Deployer** | `deploy/` & `services/airgap_verifier/` | • **CNCF Helm Umbrella Chart** (`values.yaml`, `values-demo.yaml`, `values-prod-airgap.yaml`) + **Zarf** disconnected bundle<br>• **SRE Operability Manifests:** `PodDisruptionBudget`, `HorizontalPodAutoscaler v2`, `startup`/`liveness`/`readiness` probes, `preStop` `/v1/ops/drain`, and Google SRE **Multi-Burn `PrometheusRule` (14.4x / 6x)**<br>• **Supply-Chain Security:** `Kyverno` `@sha256` policy + offline **Cosign ECDSA P-256**, **SLSA v1.0 provenance**, and **CycloneDX 1.5 SBOM** 0-Critical-CVE gate (`supply_chain.py`)<br>• **Multi-Cloud Sovereign IaC:** 3-AZ AWS PrivateLink VPC + **Azure Government AMD SEV-SNP Confidential Enclave** (`0` IGW / `0` NAT) + zero-arg `--factory` non-root (`UID 65532`) `Dockerfile` | Zero-drop rolling deploys (`30s` drain); 7-point automated air-gap & supply-chain audit (`<= 250ms`) |
 | **3** | **Unstructured Legacy Ingestor** | `services/legacy_ingestor/` | • **IBM z/OS `CP037`/`CP500`/`CP1140` EBCDIC** + bit-exact signed **`COMP-3` BCD** (`ACCTLDGR`)<br>• **Enterprise COBOL `RECFM=VB` (BDW/RDW)** variable-length blocks, **`OCCURS DEPENDING ON`** dynamic arrays, and discriminated **`REDEFINES`** unions (`cobol_advanced.py`)<br>• **ISO 20022 `pacs.008`** XXE-hardened institutional wire settlement parser<br>• **Layout-aware PDF + Tesseract OCR** with cross-page pipe-table header carryover & contextual late-window headers<br>• **Binary SHA-256 Merkle-Tree Incremental Sync** (`merkle_sync.py`) re-embedding only mutated pages/records | `O(changed)` delta sync skips `>= 95%` redundant embedding cost on amended filings |
 | **4** | **Row-Level Secure RAG Engine** | `services/secure_rag_engine/` | • **PostgreSQL 18 `ENABLE` + `FORCE ROW LEVEL SECURITY`** under `aegis_app_runtime` (`NOBYPASSRLS`)<br>• **Transitive Zanzibar Hierarchy Closure (`aegis_effective_groups`):** cycle-safe recursive CTE (`<= 8` hops) inside Postgres RLS resolving nested user/group/deal-room grants AND **transitive `ethical_wall_deny` barriers**<br>• **Hybrid Dense Cosine + `ts_rank_cd` RRF ($k=60$)** + RFC 9396 `rag_corpus` source filtering<br>• **On-Prem Cross-Encoder Reranker** + **Deterministic Citation Grounding Verifier** (`/v1/verify-citations`, blocking unauthorized or unentailed `[chk-...]` citations) + optional constant-floor timing pad | `0` cross-tenant/clearance/wall leaks under 16-conn LIFO pool contention; `2000ms` hard `statement_timeout` |
@@ -84,6 +98,42 @@ Every HTTP service installs `install_aegis_http_layer` (`packages/aegis_core/htt
 
 ---
 
+## Production Cutover Runbook: Bringing External & Live-Infrastructure Scope to Fruition
+
+Automated CI verifies 100% of domain logic, static types, IaC syntax, live PostgreSQL 18 `FORCE RLS` policies, Temporal workflows, and multi-worker load/chaos NFRs locally and on GitHub Actions. Bringing the **external hardware, cloud enclave, enterprise IdP/SaaS, and live SAP ERP scope** to production fruition requires executing the 6 cutover workstreams below:
+
+### 1. Wire Production Adapters in the Outer Composition Root (`services/runtime_host/bootstrap.py`)
+By default, `create_service_app_from_env()` boots self-contained Meridian Twin adapters so local demos and container smoke tests run with zero external credentials. All production adapters already exist in the codebase and must be bound when `AEGIS_ENVIRONMENT=production` (failing fast if `enterpriseTwin.enabled=false` and any required DSN/secret is missing):
+* **Audit & Retrieval (`aegis_core/audit.py`, `secure_rag_engine/store.py`):** Swap `InMemoryAuditLedger` -> `PostgresAuditLedger(dsn=AEGIS_PG_DSN)` and bind `PostgresRLSRetrievalStore(dsn=AEGIS_PG_DSN)` + on-prem `SentenceTransformer` / `vLLM` embeddings instead of `DeterministicFinancialEmbedder`.
+* **Revocation & KMS (`sso_delegation_broker/revocation.py`, `pii_unmasking_proxy/vault.py`):** Swap `InMemoryRevocationStore` -> `RedisRevocationStore(redis_client)` (`AEGIS_REDIS_URL`) and inject HSM / AWS KMS / Azure Key Vault wrapping keys (`AEGIS_KMS_KEK_HEX`, `SigningKeyRing` private keys via CSI Secret Store Driver).
+* **ERP & GPU Triage (`mcp_erp_bridge/soap_client.py`, `edge_triage_router/router.py`):** Swap `DirectInProcessSOAPTransport` -> `HttpSOAPTransport(endpoint_url=AEGIS_SAP_SOAP_URL)` with mTLS client certificates, and swap `DeterministicOnPremClassifierAdapter` -> an HTTP `LocalTriageModelPort` client targeting the internal `vLLM` `guided_json` endpoint (`AEGIS_VLLM_BASE_URL`).
+
+### 2. Cloud Enclave Provisioning, Supply-Chain Signing & Air-Gapped Zarf Cutover (`deploy/`)
+* **Terraform State & Apply:** Configure an encrypted remote backend (AWS S3 + KMS + lockfile or Azure Gov Storage) in `deploy/terraform/aws_airgap_vpc` or `deploy/terraform/azure_gov_enclave`, then execute `terraform plan -out=enclave.tfplan && terraform apply enclave.tfplan` to provision the 3-AZ zero-IGW/zero-NAT VPC Endpoints or `Standard_DC32as_v5` AMD SEV-SNP confidential AKS node pool.
+* **OCI Build, Cosign Attestation & Digest Pinning:** Build immutable images from `deploy/docker/Dockerfile`, generate CycloneDX 1.5 SBOMs (`syft`) and SLSA v1.0 provenance, sign with hardware-backed Cosign keys (`cosign sign --key kms://...`), and replace the placeholder `sha256:1111...` digests in `deploy/helm/aegis/values.yaml` with real registry `@sha256` digests verified by `supply_chain.py` and Kyverno admission policies.
+* **Disconnected Enclave Transfer:** Package images, charts, and internal root CAs via `zarf package create deploy/zarf --confirm`, transfer across the air-gap diode, mirror into the enclave registry (`zarf package deploy`), and cut over via `helm upgrade --install aegis deploy/helm/aegis -n aegis-system -f deploy/helm/aegis/values-prod-airgap.yaml`.
+
+### 3. Physical NVIDIA GPU Node Bring-Up & Offline Model Staging (`edge_triage_router` & `secure_rag_engine`)
+* **GPU Infrastructure:** Provision GPU worker nodes (`NVIDIA L4`, `L40S`, or `H100 SXM` per `arch_scoper` BOM) running the NVIDIA GPU Operator and DCGM Exporter (scraping GPU kWh/utilization into Prometheus/FinOps).
+* **Air-Gapped Weights & Conformal Calibration:** Pre-stage SHA-256-verified weights (`Qwen2.5-8B-Instruct-AWQ`, department LoRA adapters, dense embedding & cross-encoder reranker models) onto encrypted read-only PVCs mounted with `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`. Calibrate `ConformalCascadeDecider` threshold $\hat{q}_{1-\alpha}$ against 500+ labeled customer prompts and validate live `TTFT p99` and `85%`/`15%` WFQ KV-cache shedding under load.
+
+### 4. Enterprise IdP, SPIFFE mTLS, Collaboration SaaS & Hardware FIDO2 Cutover
+* **Corporate IdP & SCIM/SSF (`sso_delegation_broker`, `admin_control_plane`):** Register Aegis with Okta, Microsoft Entra ID, or PingFederate; configure live `oidcIssuerUrl` / JWKS URI, upload SAML 2.0 SP metadata/X.509 certificates, wire SCIM 2.0 group push to `/scim/v2/Groups`, and point the IdP's OpenID SSF / CAEP transmitter at `POST /v1/ssf/events` for sub-second session/risk revocation. Deploy SPIRE Server/Agent to issue short-lived X.509 workload SVIDs (`spiffe://<customer-domain>/agent/...`) for RFC 8705 mTLS binding.
+* **Temporal Cluster, Slack/Teams & WebAuthn (`temporal_approval_gate`):** Deploy a production multi-node Temporal Server cluster backed by PostgreSQL/Cassandra running dedicated `HighValuePOApprovalWorkflow` workers with KMS-keyed `AESGCMPayloadCodec`. Register the Slack App Interactivity URL (`POST /v1/webhooks/slack/interactive`, binding `SLACK_SIGNING_SECRET`) and/or Microsoft Teams Adaptive Cards v1.5 bot endpoint, and enroll executive approvers' FIDO2 hardware passkeys (YubiKey Bio / platform authenticators with `UV=1`) under the production Relying Party ID (`rp_id`).
+
+### 5. Live SAP S/4HANA / ECC NetWeaver ABAP & Stateful Data Tier Cutover
+* **SAP `SOAMANAGER` & WSDL Onboarding (`mcp_erp_bridge`):** Expose `BAPI_PO_CREATE1`, `BAPI_PO_CHANGE`, and vendor-master RFCs via SAP NetWeaver `SOAMANAGER` over TLS 1.3 / mTLS with a least-privilege SAP Communications User; export customer WSDL 1.1 / XSD schemas through `wsdl_compiler.py`, verify mandatory `TESTRUN='X'` pre-flight and `BAPI_PO_CHANGE` (`DELETE_IND='L'`) Saga rollback in SAP `QAS`, and cap `AIMDConcurrencyLimiter.max_limit` strictly below SAP's `rdisp/wp_no_dia` dialog work process allocation.
+* **HA Stateful Persistence & WORM Storage:** Provision HA PostgreSQL 18 (`pgvector` + `001_rls_schema.sql` migration + `aegis_app_runtime` `NOBYPASSRLS` role via PgBouncer transaction/session pooling), Redis Cluster/Sentinel (`RedisRevocationStore`), ClickHouse `ReplicatedMergeTree` (`finops_telemetry` DDL + FOCUS 1.0 ERP GL export), and an AWS S3 Object Lock (`COMPLIANCE` mode) or Azure Immutable Blob bucket receiving signed SEC 17a-4 WORM audit bundles.
+
+### 6. Pre-Traffic Go-Live Sign-Off Checklist
+- [ ] `verify_airgap_bundle_readiness()` + `verify_container_supply_chain()` pass `100%` against real registry `@sha256` digests, Cosign signatures, and 0-Critical-CVE CycloneDX SBOMs; unsigned test pods are rejected by Kyverno.
+- [ ] Live egress firewall drill confirms `0.0.0.0/0` outbound TCP/UDP/DNS from `aegis-system` pods is dropped at both Kubernetes `NetworkPolicy` and VPC/NSG layers.
+- [ ] Live PostgreSQL 18 `FORCE RLS` smoke drill with real corporate IdP tokens proves `0` cross-tenant, clearance, or `ethical_wall_deny` leakage under concurrent pool load.
+- [ ] End-to-end SAP `QAS` Purchase Order drill verifies `TESTRUN='X'` pre-flight, `> USD 50k` Slack/Teams pause, FIDO2 `UV=1` step-up signature, TOCTOU `STATE_ETAG` drift abort, and downstream Saga rollback.
+- [ ] Synthetic `5xx` fault injection triggers Prometheus `14.4x` multi-burn alert to PagerDuty/Opsgenie within `< 2 min` and auto-rolls back `admin_control_plane` canary weight to `0%`.
+
+---
+
 ## Quickstart & 4-Tier Verification Suite
 
 ```bash
@@ -105,7 +155,7 @@ make test-ts            # TypeScript 6.0 Admin Portal SDK, Canary/Explain/WORM &
 make verify-all
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the concentric Hexagonal dependency rings, applied engineering principles, and explicit YAGNI / First-Principles ADRs.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the concentric Hexagonal dependency rings, applied engineering principles, and explicit YAGNI / First-Principles ADRs.
 
 ---
 
