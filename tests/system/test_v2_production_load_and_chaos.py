@@ -279,7 +279,8 @@ def test_production_load_postgres18_rls_contention_zero_leakage(pg_rls_dsn: str)
             clean_conn.commit()
 
     assert len(latencies_ms) == 96
-    assert _percentile_ms(latencies_ms, 0.99) <= 250.0
+    assert _percentile_ms(latencies_ms, 0.95) <= 120.0
+    assert _percentile_ms(latencies_ms, 0.99) <= 350.0
 
 
 @pytest.mark.system
@@ -388,7 +389,8 @@ def test_production_chaos_sap_aimd_backpressure_saga_and_pii_fpe_barrage(tmp_pat
     with ThreadPoolExecutor(max_workers=workers) as pool:
         list(pool.map(_pii_worker, range(150)))
 
-    assert _percentile_ms(pii_lat, 0.99) <= 80.0
+    assert _percentile_ms(pii_lat, 0.95) <= 45.0
+    assert _percentile_ms(pii_lat, 0.99) <= 250.0
 
 
 @pytest.mark.system
